@@ -354,9 +354,22 @@ function initDecoder(codec){
 // Lag is reported per received frame, throttled to ≤10/s.
 // No 'fresh' message when idle — connection liveness is covered by WS ping/pong.
 let _lastLagReport=0;
+let _lagClockOffsetMs=null;
 function startLagReporter(){} // no-op; reporter is inline in handleBinary
 
 const CODEC_NAMES={0:'jpeg',1:'h264',2:'h265',3:'av1',4:'vp9'};
+
+// LAG_CLOCK_BEGIN
+function _linkAgeFromServerTimestamp(nowMs, capMs){
+  // Server and browser often run on different machines over SSH. Raw
+  // Date.now()-serverSendMs includes wall-clock skew, so calibrate to the
+  // lowest observed raw age and report only queue growth above that baseline.
+  const rawAge=nowMs-capMs;
+  if(!Number.isFinite(rawAge))return 1;
+  if(_lagClockOffsetMs===null||rawAge<_lagClockOffsetMs)_lagClockOffsetMs=rawAge;
+  return Math.max(1,Math.round(rawAge-_lagClockOffsetMs));
+}
+// LAG_CLOCK_END
 
 // Video playback queue — used only when buffer mode is on (_qLagMs >= 100).
 // Each incoming frame is held for buffer_ms (wallclock) before being submitted
@@ -421,7 +434,7 @@ function handleBinary(buf){
   const capMs=cmsHi*4294967296+cmsLo;
   const codec=v.getUint8(12),flags=v.getUint8(13);
   const payload=buf.slice(18);
-  const age=Date.now()-capMs;
+  const age=_linkAgeFromServerTimestamp(Date.now(),capMs);
   codecName=CODEC_NAMES[codec]||'?';
   if(age>0){
     // Rolling 5s worst-case age window (for HUD display)

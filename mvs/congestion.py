@@ -80,8 +80,8 @@ class AdaptiveController:
                 # encoder (libx264/libx265 with VBV).
                 _VBR_HEADROOM_FACTOR = 0.65
                 self.user_bw_cap = max_kbps * 1000   # for explicit-drop path (JPEG only)
-                self._max_br = int(max_kbps * 1000 * _VBR_HEADROOM_FACTOR)
-                self.bitrate = min(self.bitrate, self._max_br)
+                self._max_br = max(self._min_br, int(max_kbps * 1000 * _VBR_HEADROOM_FACTOR))
+                self.bitrate = max(self._min_br, min(self.bitrate, self._max_br))
             else:
                 self._max_br = 50_000_000
                 self.user_bw_cap = 0
