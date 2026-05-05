@@ -1,0 +1,1499 @@
+<!DOCTYPE html>
+<html><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>browser-screencast</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;background:#111;overflow:hidden}
+canvas{display:block;position:absolute;
+  user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;-moz-user-select:none}
+#hud{position:fixed;top:6px;right:10px;color:#0f0;font:11px monospace;
+  background:rgba(0,0,0,.7);padding:2px 8px;border-radius:3px;z-index:9;
+  cursor:pointer;user-select:none}
+#hud.dim{opacity:0.25}
+#hud.hide{opacity:0;pointer-events:none}
+#cur{position:fixed;width:12px;height:12px;border:2px solid #fff;border-radius:50%;
+  pointer-events:none;transform:translate(-50%,-50%);box-shadow:0 0 4px #000;z-index:9}
+#cur.dn{border-color:#ff0}
+#st{position:fixed;bottom:8px;left:50%;transform:translateX(-50%);color:#aaa;
+  font:11px monospace;background:rgba(0,0,0,.7);padding:2px 10px;border-radius:3px;
+  pointer-events:none;z-index:9}
+#ki{position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;
+  pointer-events:none;z-index:-1;resize:none;border:0;padding:0}
+/* Dock */
+#dock{position:fixed;left:0;top:50%;transform:translateY(-50%);
+  background:rgba(0,0,0,.82);color:#eee;font:12px/1.5 monospace;
+  border-radius:0 6px 6px 0;z-index:20;user-select:none;overflow:hidden}
+#dock-tab{width:16px;min-height:56px;display:flex;align-items:center;
+  justify-content:center;cursor:pointer;font-size:10px}
+#dock.open #dock-tab{display:none}
+#dock-head{display:none;padding:4px 8px 3px;border-bottom:1px solid rgba(255,255,255,.1);
+  font-size:10px;color:#888}
+#dock.open #dock-head{display:flex;justify-content:space-between}
+#dock-body{display:none;padding:5px 8px 8px;min-width:148px}
+#dock.open #dock-body{display:block}
+.dock-btn{display:block;width:100%;margin:3px 0;padding:5px 7px;
+  background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.14);
+  border-radius:3px;color:#ccc;cursor:pointer;text-align:left;font:12px monospace}
+.dock-btn:hover{background:rgba(255,255,255,.16);color:#fff}
+.dock-btn.active{background:rgba(70,180,70,.22);border-color:rgba(70,200,70,.4);color:#8f8}
+#sk-menu{display:none;margin-top:3px;padding:3px 0 0;
+  border-top:1px solid rgba(255,255,255,.09)}
+#sk-menu.show{display:block}
+.sk-btn{display:block;width:100%;margin:2px 0;padding:3px 6px;
+  background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.09);
+  border-radius:2px;color:#aaa;cursor:pointer;text-align:left;font:11px monospace}
+.sk-btn:hover{background:rgba(255,255,255,.13);color:#ddd}
+#clip-section{margin-top:5px;padding-top:5px;border-top:1px solid rgba(255,255,255,.09)}
+#clip-ta{width:100%;height:54px;margin:3px 0;background:rgba(255,255,255,.07);
+  border:1px solid rgba(255,255,255,.14);border-radius:3px;color:#ccc;
+  font:11px monospace;resize:vertical;padding:3px 5px}
+#clip-ta:focus{outline:1px solid rgba(100,180,255,.5);color:#fff}
+.clip-row{display:flex;gap:4px;margin:2px 0}
+.clip-row button{flex:1;padding:3px 0;font:11px monospace;
+  background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.14);
+  border-radius:3px;color:#ccc;cursor:pointer}
+.clip-row button:hover{background:rgba(255,255,255,.18);color:#fff}
+#sk-custom{margin-top:4px;padding-top:4px;border-top:1px solid rgba(255,255,255,.07)}
+.mod-row{display:flex;gap:4px;flex-wrap:wrap;margin:3px 0}
+.mod-cb{display:flex;align-items:center;gap:2px;color:#aaa;font:11px monospace;cursor:pointer}
+.mod-cb input{cursor:pointer;accent-color:#6b6}
+#sk-key-input{width:100%;margin:2px 0;padding:3px 5px;background:rgba(255,255,255,.07);
+  border:1px solid rgba(255,255,255,.14);border-radius:3px;color:#ccc;font:11px monospace}
+#sk-key-input:focus{outline:1px solid rgba(100,180,255,.5);color:#fff}
+#quality-section{margin-top:5px;padding-top:5px;border-top:1px solid rgba(255,255,255,.09)}
+.q-row{display:flex;align-items:center;justify-content:space-between;margin:3px 0;font:11px monospace;color:#aaa}
+.q-row label{color:#888;min-width:40px}
+.q-sel{background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.14);border-radius:3px;
+  color:#ccc;font:11px monospace;padding:2px 4px;flex:1;cursor:pointer}
+.q-sel:focus{outline:1px solid rgba(100,180,255,.4)}
+</style></head><body>
+<canvas id="c"></canvas>
+<div id="hud">connecting...</div>
+<div id="cur"></div>
+<div id="st"></div>
+<textarea id="ki" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
+<div id="dock" class="closed">
+  <div id="dock-tab">&gt;</div>
+  <div id="dock-head"><span>Menu</span><span id="dock-close" style="cursor:pointer">[x]</span></div>
+  <div id="dock-body">
+    <button class="dock-btn" id="btn-fs">Fullscreen</button>
+    <button class="dock-btn" id="btn-fit">Fit screen</button>
+    <button class="dock-btn" id="btn-plock" style="display:none">Pointer lock [off]</button>
+    <button class="dock-btn" id="btn-hide-cursor">Hide cursor [off]</button>
+    <button class="dock-btn" id="btn-audio">Audio [off]</button>
+    <button class="dock-btn" id="btn-fix" title="Force a keyframe to clear video corruption">Fix screen</button>
+    <button class="dock-btn" id="btn-ctrl">Ctrl=Super [off]</button>
+    <button class="dock-btn" id="btn-sk">Special keys ▾</button>
+    <div id="sk-menu">
+      <button class="sk-btn" id="sk-spotlight">Super+Space</button>
+      <button class="sk-btn" id="sk-appsw">Super+Tab</button>
+      <button class="sk-btn" id="sk-quit">Super+Q</button>
+      <button class="sk-btn" id="sk-esc">Escape</button>
+      <button class="sk-btn" id="sk-tab">Tab</button>
+      <button class="sk-btn" id="sk-f11">F11</button>
+      <button class="sk-btn" id="sk-f12">F12</button>
+      <button class="sk-btn" id="sk-cad">Ctrl+Alt+Del</button>
+      <button class="sk-btn" id="sk-ctrlc">Ctrl+C (interrupt)</button>
+      <button class="sk-btn" id="sk-ctrlz">Ctrl+Z (suspend)</button>
+      <button class="sk-btn" id="sk-ctrld">Ctrl+D (EOF)</button>
+      <button class="sk-btn" id="sk-zoom-in">Super+= (zoom in)</button>
+      <button class="sk-btn" id="sk-zoom-out">Super+- (zoom out)</button>
+      <button class="sk-btn" id="sk-redo">Super+Shift+Z (redo)</button>
+      <div id="sk-custom">
+        <div class="mod-row">
+          <label class="mod-cb"><input type="checkbox" id="mod-shift">Shift</label>
+          <label class="mod-cb"><input type="checkbox" id="mod-ctrl">Ctrl</label>
+          <label class="mod-cb"><input type="checkbox" id="mod-alt">Alt</label>
+          <label class="mod-cb"><input type="checkbox" id="mod-cmd">Super</label>
+        </div>
+        <input id="sk-key-input" placeholder="key or F1…F12 then Enter" autocomplete="off" spellcheck="false">
+      </div>
+    </div>
+    <div id="clip-section">
+      <div style="color:#666;font:10px monospace;margin-bottom:2px">Clipboard (remote→here)</div>
+      <textarea id="clip-ta" placeholder="Remote clipboard appears here. Edit then Paste↓" spellcheck="false"></textarea>
+      <div class="clip-row">
+        <button id="clip-paste">Paste remote</button>
+        <button id="clip-clear">Clear</button>
+      </div>
+    </div>
+    <div id="quality-section">
+      <div style="color:#666;font:10px monospace;margin-bottom:3px">Stream quality (maximums)</div>
+      <div class="q-row"><label>Res</label><select class="q-sel" id="q-res"><option value="0">Auto</option></select></div>
+      <div class="q-row"><label>FPS</label><select class="q-sel" id="q-fps">
+        <option value="0">Max (60 fps)</option>
+        <option value="60">60 fps</option>
+        <option value="30">30 fps</option>
+        <option value="20">20 fps</option>
+        <option value="10">10 fps</option>
+      </select></div>
+      <div class="q-row"><label>Max BW</label><select class="q-sel" id="q-bw">
+        <option value="0">Unlimited</option>
+        <option value="100000">100 Mbps</option>
+        <option value="50000">50 Mbps</option>
+        <option value="25000" selected>25 Mbps</option>
+        <option value="10000">10 Mbps</option>
+        <option value="5000">5 Mbps</option>
+        <option value="2000">2 Mbps</option>
+        <option value="1000">1 Mbps</option>
+      </select></div>
+      <div class="q-row"><label>Codec</label><select class="q-sel" id="q-codec">
+        <option value="auto">Auto</option>
+        <!-- populated after WebCodecs probe -->
+      </select></div>
+      <div class="q-row"><label>Buffer</label><select class="q-sel" id="q-lag">
+        <option value="0" selected>responsive (no buffer)</option>
+        <option value="100">100ms</option>
+        <option value="200">200ms</option>
+        <option value="500">500ms (smooth video)</option>
+        <option value="1000">1s</option>
+        <option value="3000">3s (cinema)</option>
+      </select></div>
+      <div class="q-row"><label>Status overlay</label><select class="q-sel" id="q-hud">
+        <option value="0" selected>Off</option>
+        <option value="1">On (top-right)</option>
+      </select></div>
+      <div class="q-row"><label>Scroll</label><select class="q-sel" id="q-scroll">
+        <option value="0.25">0.25×</option>
+        <option value="0.5">0.5×</option>
+        <option value="1" selected>1× (default)</option>
+        <option value="1.5">1.5×</option>
+        <option value="2">2×</option>
+        <option value="3">3×</option>
+      </select></div>
+      <div style="margin-top:6px">
+        <button class="dock-btn" id="q-reset" style="width:100%;font-size:10px;padding:3px 0">Reset to defaults</button>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+const canvas=document.getElementById('c'),ctx=canvas.getContext('2d',{alpha:false,desynchronized:true});
+const hud=document.getElementById('hud'),cur=document.getElementById('cur');
+const st=document.getElementById('st'),ki=document.getElementById('ki');
+
+let imgW=1920,imgH=1080,scaleX=1,scaleY=1,ox=0,oy=0;
+let _nativeW=1920,_nativeH=1080; // remote capture resolution — used for mouse coordinate mapping
+let ws,wsOpen=false,mBtn=0,fc=0,lastFpsT=performance.now();
+let _lastAnyData=Date.now(); // updated on every WS message; stall-detect uses this
+let clipSynced=false;       // true only when navigator.clipboard.readText() permission is persistently granted
+let _lastMacClipboard='';   // last clipboard text known on remote side; used to break sync loops
+let _clipPollTimer=null;    // setInterval handle for browser-clipboard polling
+let _macClipboardSeq=-1;    // seq of the last remote clipboard message seen; -1 = not seen yet
+let fitMode='fit';       // 'fit' = letterbox, 'cover' = fill/crop
+// Optional Ctrl→Super remap. Default off for Linux/Windows remotes because Ctrl
+// should remain Ctrl; Mac-browser Cmd still arrives as Meta and maps to Super.
+let ctrlToMeta=false;
+let _ctrlRemapped={};    // tracks in-flight ctrl→meta remap for keyup pairing
+const _suppressedKd=new Set(); // keys whose keydown was intercepted; suppress matching keyup
+// Codes of keys we've sent kd for and not yet sent ku. Used by _syncMods to
+// detect modifier releases that the browser silently ate (Super+Tab, Super+Space,
+// system shortcut consumed the keyup, focus moved off ki between down and up).
+const _heldKeys=new Set();
+const _MOD_CODES={
+  Control:['ControlLeft','ControlRight'],
+  Shift:  ['ShiftLeft','ShiftRight'],
+  Alt:    ['AltLeft','AltRight'],
+  Meta:   ['MetaLeft','MetaRight'],
+};
+// Reconcile tracked-held modifiers with actual OS state on every event that
+// carries getModifierState (keyboard + pointer). For each modifier the OS
+// reports as released but we still think is held, send a synthetic ku so the
+// remote side releases the corresponding flag. This is what prevents "stuck Ctrl"
+// after a system shortcut absorbs the release.
+function _syncMods(e){
+  if(!e||typeof e.getModifierState!=='function'||!wsOpen)return;
+  for(const name in _MOD_CODES){
+    if(e.getModifierState(name))continue;
+    for(const code of _MOD_CODES[name]){
+      if(!_heldKeys.has(code))continue;
+      _heldKeys.delete(code);
+      // Apply the same Ctrl→Super remap on the way out (so the remote sees the
+      // release of whatever it saw the press of).
+      const remap=_ctrlRemapped[code];
+      const sendCode=remap||code;
+      const sendKey=remap||name; // 'Control','Shift','Alt','Meta'
+      delete _ctrlRemapped[code];
+      send({t:'ku',k:sendKey,code:sendCode});
+    }
+  }
+}
+let _suppressReconnect=false,_hiddenTimer=null;  // tab visibility disconnect
+let _hideCursor=false;      // dock "Hide cursor" toggle
+let _plockActive=false;     // pointer lock engaged (real or emulated)
+let _plockVX=0,_plockVY=0; // virtual cursor position in native remote coords (pointer lock mode)
+const _plockSupported='requestPointerLock' in document.documentElement||'requestPointerLock' in (document.createElement('canvas'));
+
+// Metrics
+let rxBytes=0,rxBps=0;         // WebSocket receive bandwidth
+let codecName='';               // current codec name
+let ageWindow=[];               // rolling 5s frame-age samples [{ts,age}]
+let worstAge5s=0;               // worst-case frame age in last 5s
+let staleMs=0;                  // server-reported screen content age (ms)
+let hudMode=0;                  // 0=full 1=dim (cycles on click when shown)
+let _hudShown=false;            // master visibility (menu toggle); default off
+
+function _applyHudVisibility(){
+  hud.className = !_hudShown ? 'hide' : (hudMode===1 ? 'dim' : '');
+}
+hud.addEventListener('click',()=>{
+  if(!_hudShown) return;            // hidden → menu toggle is the only way back
+  hudMode = (hudMode + 1) % 2;      // toggle dim/full
+  _applyHudVisibility();
+});
+
+// ---------------------------------------------------------------------------
+// Layout
+// ---------------------------------------------------------------------------
+function resize(){
+  const vw=window.innerWidth,vh=window.innerHeight;
+  const ar=imgW/imgH,vr=vw/vh;
+  let cw,ch;
+  if(fitMode==='cover'){
+    if(ar>vr){ch=vh;cw=vh*ar}else{cw=vw;ch=vw/ar}
+  }else{
+    if(ar>vr){cw=vw;ch=vw/ar}else{ch=vh;cw=vh*ar}
+  }
+  ox=(vw-cw)/2;oy=(vh-ch)/2;
+  canvas.style.cssText='left:'+ox+'px;top:'+oy+'px;width:'+cw+'px;height:'+ch+'px;position:absolute;';
+  scaleX=_nativeW/cw;scaleY=_nativeH/ch;
+  // Size canvas backing to physical pixels so compositing is 1:1 — no GPU scaling step.
+  const dpr=window.devicePixelRatio||1;
+  canvas.width=Math.round(cw*dpr);canvas.height=Math.round(ch*dpr);
+  // Resetting canvas.width clears context state — restore high-quality scaling.
+  ctx.imageSmoothingEnabled=true;ctx.imageSmoothingQuality='high';
+}
+window.addEventListener('resize',()=>{resize();sendRes();});
+// Recompute when DPR changes (e.g. dragging window to a different monitor).
+(()=>{const mq=matchMedia(`(resolution: ${window.devicePixelRatio||1}dppx)`);mq.addEventListener('change',()=>{resize();},{ once:true });})();
+
+function setDim(w,h){
+  if(w===imgW&&h===imgH)return;
+  imgW=w;imgH=h;resize();
+}
+
+// ---------------------------------------------------------------------------
+// WebCodecs decoder
+// ---------------------------------------------------------------------------
+let useVideo=false; // set true only after caps probe confirms a working codec
+let decoder=null,decoderCodec=-1;
+
+// Codec byte → WebCodecs codec string
+const CODEC_STRINGS={
+  1:'avc1.640028',       // H.264 High Profile Level 4.0
+  2:'hev1.1.6.L93.B0',  // H.265 Main Profile
+  3:'av01.0.08M.08',    // AV1 Main Profile Level 4.0
+  4:'vp09.00.10.08',    // VP9 Profile 0
+};
+
+// Probe which codecs the browser can decode via WebCodecs.
+// Stores the exact config that isConfigSupported approved so configure() uses
+// the identical options — avoiding browsers where isConfigSupported is optimistic.
+const _codecConfig={}; // codec name → exact VideoDecoderConfig approved by probe
+const _codecCaps={};   // codec name → {hw:boolean, sw:boolean}
+async function probeSupportedCodecs(){
+  if(typeof VideoDecoder==='undefined')return[];
+  const probes=[
+    {name:'av1', codec:'av01.0.08M.08'},
+    {name:'h265',codec:'hev1.1.6.L93.B0'},
+    {name:'vp9', codec:'vp09.00.10.08'},
+    {name:'h264',codec:'avc1.640028'},
+  ];
+  const out=[];
+  for(const p of probes){
+    _codecCaps[p.name]={hw:false,sw:false};
+    for(const [kind,hw] of [['hw','prefer-hardware'],['sw','prefer-software']]){
+      for(const lat of[true,false]){
+        const cfg={codec:p.codec,hardwareAcceleration:hw,optimizeForLatency:lat};
+        try{
+          const r=await VideoDecoder.isConfigSupported(cfg);
+          if(r.supported){
+            _codecCaps[p.name][kind]=true;
+            if(!_codecConfig[p.name])_codecConfig[p.name]=cfg;
+            break;
+          }
+        }catch(e){}
+      }
+    }
+    if(_codecCaps[p.name].hw||_codecCaps[p.name].sw)out.push(p.name);
+  }
+  return out;
+}
+
+function initDecoder(codec){
+  if(!useVideo)return;
+  if(decoder&&decoderCodec===codec)return;
+  if(decoder){try{decoder.close()}catch(e){}}
+  const cs=CODEC_STRINGS[codec];
+  if(!cs){console.warn('Unknown codec byte',codec);useVideo=false;return;}
+  try{
+    decoder=new VideoDecoder({
+      output:frame=>{
+        setDim(frame.codedWidth,frame.codedHeight);
+        ctx.drawImage(frame,0,0,canvas.width,canvas.height);frame.close();
+        fc++;updateFps();
+      },
+      error:e=>{
+        console.warn('VideoDecoder:',e);
+        useVideo=false;decoder=null;
+        // Tell server to switch to JPEG so we still get frames (e.g. Firefox WebCodecs)
+        if(wsOpen)send({t:'caps',webcodecs:false,codecs:[],w:canvas.width,h:canvas.height});
+      }
+    });
+    const probedCfg=_codecConfig[CODEC_NAMES[codec]];
+    decoder.configure(probedCfg||{codec:cs,hardwareAcceleration:'prefer-hardware',optimizeForLatency:true});
+    decoderCodec=codec;
+  }catch(e){console.warn('VideoDecoder configure:',e);useVideo=false;decoder=null;}
+}
+
+// ---------------------------------------------------------------------------
+// Frame receive + lag reporting
+// ---------------------------------------------------------------------------
+// Lag is reported per received frame, throttled to ≤10/s.
+// No 'fresh' message when idle — connection liveness is covered by WS ping/pong.
+let _lastLagReport=0;
+function startLagReporter(){} // no-op; reporter is inline in handleBinary
+
+const CODEC_NAMES={0:'jpeg',1:'h264',2:'h265',3:'av1',4:'vp9'};
+
+// Video playback queue — used only when buffer mode is on (_qLagMs >= 100).
+// Each incoming frame is held for buffer_ms (wallclock) before being submitted
+// to the decoder. This is what gives "press play, see N seconds of pre-buffer
+// fill, then smooth playback always running N seconds behind real-time".
+// Audio uses AudioContext scheduling for the same effect — both sides land at
+// the same target latency so A/V stays aligned.
+const _vidQueue = [];   // [{codec, flags, capMs, payload, decodeAt(ms perf.now)}]
+let _vidScheduler = null;
+function _scheduleVideoFlush(){
+  if(_vidScheduler!==null) return;
+  function tick(){
+    _vidScheduler = null;
+    const now = performance.now();
+    while(_vidQueue.length && _vidQueue[0].decodeAt <= now){
+      const it = _vidQueue.shift();
+      _decodeNow(it.codec, it.flags, it.capMs, it.payload);
+    }
+    if(_vidQueue.length){
+      const dt = Math.max(1, _vidQueue[0].decodeAt - performance.now());
+      _vidScheduler = setTimeout(tick, dt);
+    }
+  }
+  tick();
+}
+function _flushVideoBufferImmediately(){
+  // Drain everything queued now (used when user switches OUT of buffer mode).
+  while(_vidQueue.length){
+    const it = _vidQueue.shift();
+    _decodeNow(it.codec, it.flags, it.capMs, it.payload);
+  }
+  if(_vidScheduler!==null){clearTimeout(_vidScheduler); _vidScheduler=null;}
+}
+function _decodeNow(codec, flags, capMs, payload){
+  if(codec===0||!useVideo){
+    createImageBitmap(new Blob([payload],{type:'image/jpeg'})).then(bmp=>{
+      setDim(bmp.width,bmp.height);
+      ctx.drawImage(bmp,0,0,canvas.width,canvas.height);bmp.close();
+      fc++;updateFps();
+    }).catch(()=>{});
+  }else{
+    initDecoder(codec);
+    if(decoder&&decoder.state==='configured'){
+      try{
+        decoder.decode(new EncodedVideoChunk({
+          type:(flags&1)?'key':'delta',
+          timestamp:capMs*1000,
+          data:new Uint8Array(payload)
+        }));
+      }catch(e){console.warn('decode:',e);}
+    }
+  }
+}
+
+function handleBinary(buf){
+  if(buf.byteLength<18)return;
+  rxBytes+=buf.byteLength;  // bandwidth tracking
+  const v=new DataView(buf);
+  const seq=v.getUint32(0);
+  // capture_ms as two uint32 (avoids BigInt on older browsers)
+  const cmsHi=v.getUint32(4),cmsLo=v.getUint32(8);
+  const capMs=cmsHi*4294967296+cmsLo;
+  const codec=v.getUint8(12),flags=v.getUint8(13);
+  const payload=buf.slice(18);
+  const age=Date.now()-capMs;
+  codecName=CODEC_NAMES[codec]||'?';
+  if(age>0){
+    // Rolling 5s worst-case age window (for HUD display)
+    const now=Date.now();
+    ageWindow.push({ts:now,age});
+    ageWindow=ageWindow.filter(e=>now-e.ts<5000);
+    worstAge5s=ageWindow.length?Math.max(...ageWindow.map(e=>e.age)):0;
+    // Per-frame lag report, throttled to ≤10/s.
+    // Note: this measures LINK lag (receipt - send), not display lag.
+    // In buffer mode the display is intentionally delayed; the server's
+    // congestion controller correctly sees only the link lag, which is
+    // what it needs to decide whether to back off the encoder.
+    if(now-_lastLagReport>=100){
+      _lastLagReport=now;
+      send({t:'lag',age_ms:Math.round(age)});
+    }
+  }
+
+  // Buffer mode: hold this frame for _qLagMs ms before decoding it.
+  // Responsive mode (default): decode immediately — preserves the existing
+  // path that's been tuned to perfection.
+  const bufMs = _qLagMs|0;
+  if(bufMs >= 100){
+    _vidQueue.push({codec, flags, capMs, payload, decodeAt: performance.now() + bufMs});
+    _scheduleVideoFlush();
+  }else{
+    _decodeNow(codec, flags, capMs, payload);
+  }
+}
+
+function updateFps(){
+  const now=performance.now();
+  const dt=(now-lastFpsT)/1000;
+  if(dt>=1){
+    rxBps=rxBytes*8/dt;  // bits per second
+    rxBytes=0;
+    const bw=rxBps>=1e6?(rxBps/1e6).toFixed(1)+'Mbps':(rxBps/1e3).toFixed(0)+'Kbps';
+    const lag=worstAge5s>0?'lag:'+worstAge5s+'ms ':'';
+    const codec=codecName?codecName+' ':'';
+    const net=worstMetricRtt5s>0?'net:'+worstMetricRtt5s+'ms ':'';
+    const stl=staleMs>2000?'stale:'+(staleMs/1000).toFixed(0)+'s ':'';
+    hud.textContent=fc+'fps '+codec+bw+' '+lag+net+stl+imgW+'×'+imgH;
+    fc=0;lastFpsT=now;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Quality menu — resolution + FPS cap
+// ---------------------------------------------------------------------------
+const _Q_PRESETS=[
+  {label:'2160p (4K)',h:2160},{label:'1440p (QHD)',h:1440},
+  {label:'1080p (Full HD)',h:1080},{label:'720p (HD)',h:720},
+  {label:'480p (SD)',h:480},{label:'360p',h:360},{label:'240p',h:240},
+];
+let _qCapH=0,_qFps=0,_qBwKbps=25000,_qCodec='auto',_qLagMs=0,_scrollMul=1.0,_qMenuBuilt=false;
+let _probedCodecs=[]; // filled after WebCodecs probe; used to populate codec select
+
+function _qCookie(){
+  // v7 format: cap_h,fps,bw,codec,lag,scroll,hud
+  const m7=document.cookie.match(/mvs_q=(\d+),(\d+),(\d+),([^,;]+),(\d+),([\d.]+),(\d+)/);
+  if(m7)return{cap_h:parseInt(m7[1]),fps:parseInt(m7[2]),bw:parseInt(m7[3]),codec:m7[4]||'auto',lag:parseInt(m7[5]),scroll:parseFloat(m7[6])||1,hud:parseInt(m7[7])||0};
+  // v6 format: cap_h,fps,bw,codec,lag,scroll
+  const m6=document.cookie.match(/mvs_q=(\d+),(\d+),(\d+),([^,;]+),(\d+),([\d.]+)/);
+  if(m6)return{cap_h:parseInt(m6[1]),fps:parseInt(m6[2]),bw:parseInt(m6[3]),codec:m6[4]||'auto',lag:parseInt(m6[5]),scroll:parseFloat(m6[6])||1,hud:0};
+  // v5: cap_h,fps,bw,codec,lag
+  const m=document.cookie.match(/mvs_q=(\d+),(\d+),(\d+),([^,;]+),(\d+)/);
+  if(m)return{cap_h:parseInt(m[1]),fps:parseInt(m[2]),bw:parseInt(m[3]),codec:m[4]||'auto',lag:parseInt(m[5]),scroll:1,hud:0};
+  // v4: cap_h,fps,bw,codec
+  const m4=document.cookie.match(/mvs_q=(\d+),(\d+),(\d+),([^;]*)/);
+  if(m4)return{cap_h:parseInt(m4[1]),fps:parseInt(m4[2]),bw:parseInt(m4[3]),codec:m4[4]||'auto',lag:0,scroll:1,hud:0};
+  // legacy
+  const m2=document.cookie.match(/mvs_q=(\d+),(\d+),(\d+)/);
+  if(m2)return{cap_h:parseInt(m2[1]),fps:parseInt(m2[2]),bw:parseInt(m2[3]),codec:'auto',lag:0,scroll:1,hud:0};
+  const m3=document.cookie.match(/mvs_q=(\d+),(\d+)/);
+  return m3?{cap_h:parseInt(m3[1]),fps:parseInt(m3[2]),bw:25000,codec:'auto',lag:0,scroll:1}:{cap_h:0,fps:0,bw:25000,codec:'auto',lag:0,scroll:1,hud:0};
+}
+function _qSaveCookie(){
+  document.cookie='mvs_q='+_qCapH+','+_qFps+','+_qBwKbps+','+_qCodec+','+_qLagMs+','+_scrollMul+','+(_hudShown?1:0)+';max-age='+(365*86400)+';SameSite=Strict';
+}
+function sendQuality(){
+  send({t:'quality',cap_h:_qCapH,fps:_qFps,maxkbps:_qBwKbps,lag_ms:_qLagMs});
+}
+function _codecCapsFor(list){
+  const out={};
+  for(const c of list||[]){
+    if(_codecCaps[c])out[c]=_codecCaps[c];
+  }
+  return out;
+}
+// Send codec choice as a caps update. 'auto' uses the full probed list;
+// a specific codec restricts to just that one; 'jpeg' forces JPEG fallback.
+function sendCaps(probed){
+  const list=probed||_probedCodecs;
+  if(_qCodec==='auto'){
+    const autoList=list.slice();
+    useVideo=autoList.length>0;
+    send({t:'caps',webcodecs:useVideo,codecs:autoList,codecCaps:_codecCapsFor(autoList),w:canvas.width,h:canvas.height});
+  }else if(_qCodec==='jpeg'){
+    useVideo=false;
+    if(decoder){try{decoder.close();}catch(e){}decoder=null;decoderCodec=-1;}
+    send({t:'caps',webcodecs:false,codecs:[],codecCaps:{jpeg:{sw:true}},w:canvas.width,h:canvas.height});
+  }else{
+    useVideo=true;
+    if(decoder&&CODEC_NAMES[decoderCodec]!==_qCodec){
+      try{decoder.close();}catch(e){}decoder=null;decoderCodec=-1;
+    }
+    send({t:'caps',webcodecs:true,codecs:[_qCodec],codecCaps:_codecCapsFor([_qCodec]),explicit:true,w:canvas.width,h:canvas.height});
+  }
+  sendQuality();
+}
+
+function _buildQualityMenu(macH){
+  if(_qMenuBuilt)return;
+  _qMenuBuilt=true;
+  const dpr=window.devicePixelRatio||1;
+  // Physical pixels the client's monitor can show — independent of browser window size.
+  const screenPhysH=Math.round(screen.height*dpr);
+  // Cap: no upscaling past native; no point sending more than screen can display.
+  // If screenPhysH is 0 or unreliable, fall back to just macH.
+  const maxH=screenPhysH>0?Math.min(macH,screenPhysH):macH;
+  const sel=document.getElementById('q-res');
+  // Clear any stale options beyond the initial Auto.
+  while(sel.options.length>1)sel.remove(1);
+  _Q_PRESETS.forEach(p=>{
+    if(p.h>maxH)return;
+    const o=document.createElement('option');
+    o.value=p.h;o.textContent=p.label;
+    sel.appendChild(o);
+  });
+  // Restore saved choice (if it's still a valid option, else default to Auto).
+  const saved=_qCookie();
+  _qCapH=saved.cap_h;_qFps=saved.fps;
+  sel.value=String(_qCapH);
+  if(sel.value!==String(_qCapH)){sel.value='0';_qCapH=0;}
+  document.getElementById('q-fps').value=String(_qFps);
+}
+
+// Populate codec select after probe. Called once on connect.
+const _CODEC_LABELS={h265:'H.265 (HEVC)',h264:'H.264 (AVC)',av1:'AV1 (CPU — no HW enc)'};
+function _populateCodecSelect(probed){
+  const sel=document.getElementById('q-codec');
+  // Remove all options except Auto (first)
+  while(sel.options.length>1)sel.remove(1);
+  probed.forEach(name=>{
+    const o=document.createElement('option');
+    o.value=name;o.textContent=_CODEC_LABELS[name]||name;
+    sel.appendChild(o);
+  });
+  // JPEG is always available as a forced-fallback option
+  const jopt=document.createElement('option');
+  jopt.value='jpeg';jopt.textContent='JPEG (no WebCodecs)';
+  sel.appendChild(jopt);
+  // Restore saved codec choice; fall back to auto if no longer available.
+  sel.value=_qCodec;
+  if(sel.value!==_qCodec){sel.value='auto';_qCodec='auto';}
+}
+
+(()=>{
+  const rSel=document.getElementById('q-res');
+  const fSel=document.getElementById('q-fps');
+  const bSel=document.getElementById('q-bw');
+  const cSel=document.getElementById('q-codec');
+  const lSel=document.getElementById('q-lag');
+  const sSel=document.getElementById('q-scroll');
+  const hSel=document.getElementById('q-hud');
+  // Restore settings from cookie immediately (codec select populated after probe).
+  const saved=_qCookie();
+  _qFps=saved.fps;fSel.value=String(_qFps);
+  _qBwKbps=saved.bw;bSel.value=String(_qBwKbps);
+  if(bSel.value!==String(_qBwKbps)){bSel.value='25000';_qBwKbps=25000;}
+  _qCodec=saved.codec||'auto';
+  _qLagMs=saved.lag||0;lSel.value=String(_qLagMs);
+  if(lSel.value!==String(_qLagMs)){lSel.value='0';_qLagMs=0;}
+  _scrollMul=saved.scroll||1;sSel.value=String(_scrollMul);
+  if(sSel.value!==String(_scrollMul)){sSel.value='1';_scrollMul=1;}
+  _hudShown=(saved.hud|0)===1;hSel.value=_hudShown?'1':'0';
+  _applyHudVisibility();
+  rSel.addEventListener('change',()=>{
+    _qCapH=parseInt(rSel.value)||0;_qSaveCookie();sendQuality();
+  });
+  fSel.addEventListener('change',()=>{
+    _qFps=parseInt(fSel.value)||0;_qSaveCookie();sendQuality();
+  });
+  bSel.addEventListener('change',()=>{
+    _qBwKbps=parseInt(bSel.value)||0;_qSaveCookie();sendQuality();
+  });
+  cSel.addEventListener('change',()=>{
+    _qCodec=cSel.value;_qSaveCookie();sendCaps();
+  });
+  lSel.addEventListener('change',()=>{
+    const old=_qLagMs;
+    _qLagMs=parseInt(lSel.value)||0;_qSaveCookie();sendQuality();
+    if(old>=100 && _qLagMs<100){
+      // Switching buffered → responsive: flush queued video so the user
+      // immediately sees real-time. Without this, the next 3s would still
+      // play out of the queue.
+      _flushVideoBufferImmediately();
+    }
+    // Audio: force a reset on next packet so the scheduling lead changes
+    // to match the new target. _nextAudioTime=0 → next packet hits the
+    // underrun-reset branch and lands at now + new_target.
+    _nextAudioTime=0;
+  });
+  sSel.addEventListener('change',()=>{
+    _scrollMul=parseFloat(sSel.value)||1;_qSaveCookie();
+  });
+  hSel.addEventListener('change',()=>{
+    _hudShown=hSel.value==='1';_qSaveCookie();_applyHudVisibility();
+  });
+  document.getElementById('q-reset').addEventListener('click',()=>{
+    const oldLag=_qLagMs;
+    _qCapH=0;_qFps=0;_qBwKbps=25000;_qCodec='auto';_qLagMs=0;_scrollMul=1;_hudShown=false;
+    document.cookie='mvs_q=;max-age=0;SameSite=Strict';
+    rSel.value='0';fSel.value='0';bSel.value='25000';cSel.value='auto';lSel.value='0';sSel.value='1';hSel.value='0';
+    _applyHudVisibility();
+    sendQuality();
+    sendCaps();
+    if(oldLag>=100)_flushVideoBufferImmediately();
+    _nextAudioTime=0;
+    ki.focus();
+  });
+  document.getElementById('btn-fix').addEventListener('click',()=>send({t:'keyframe'}));
+})();
+
+// ---------------------------------------------------------------------------
+// WebSocket
+// ---------------------------------------------------------------------------
+function send(obj){if(ws&&wsOpen)ws.send(JSON.stringify(obj));}
+// Send physical canvas pixels so the server can match encode resolution to what the canvas can actually display.
+function sendRes(){send({t:'resolution',w:canvas.width,h:canvas.height});}
+
+function _showError(text){
+  let el=document.getElementById('err-banner');
+  if(!el){
+    el=document.createElement('div');
+    el.id='err-banner';
+    el.style.cssText='position:fixed;top:0;left:0;right:0;z-index:9999;background:#c00;color:#fff;'+
+      'font:bold 15px/1.4 sans-serif;padding:14px 20px;text-align:center;cursor:pointer;'+
+      'box-shadow:0 2px 10px rgba(0,0,0,.6);';
+    el.onclick=()=>el.remove();
+    document.body.appendChild(el);
+  }
+  el.textContent=text+' — click to dismiss';
+  clearTimeout(el._t);
+  el._t=setTimeout(()=>{if(el.parentNode)el.remove();},8000);
+}
+
+function connect(){
+  const token=new URLSearchParams(location.search).get('token')||'';
+  const url='ws://'+location.host+'/stream'+(token?'?token='+encodeURIComponent(token):'');
+  ws=new WebSocket(url);
+  ws.binaryType='arraybuffer';
+  ws.onopen=()=>{
+    wsOpen=true;_lastAnyData=Date.now();
+    send({t:'reset'});  // release any stuck keys/buttons from previous session
+    st.textContent='connected';
+    startLagReporter();
+    ki.focus();
+    _checkClipboardPermission(); // silently request clipboard-read permission once per connection
+    // Probe codec support async; send caps once probing is done so server picks
+    // the best codec this browser can actually decode.
+    const haswc=typeof VideoDecoder!=='undefined';
+    if(haswc){
+      probeSupportedCodecs().then(codecs=>{
+        // Enable VideoDecoder path only after we confirm a codec works.
+        // Frames that arrived before this point go through the JPEG path (fail
+        // silently on H.264 data — createImageBitmap rejects non-JPEG — which is
+        // fine: just a brief blank until the server switches codec).
+        _probedCodecs=codecs;
+        _populateCodecSelect(codecs);
+        sendCaps(codecs);
+      });
+    }else{
+      _probedCodecs=[];
+      _populateCodecSelect([]);
+      send({t:'caps',webcodecs:false,codecs:[],w:canvas.width,h:canvas.height});
+      sendQuality();
+    }
+  };
+  ws.onclose=()=>{
+    wsOpen=false;mBtn=0;hud.textContent='disconnected';
+    if(_suppressReconnect){
+      st.textContent='paused (tab hidden)';
+    }else{
+      st.textContent='reconnecting...';
+      setTimeout(connect,2000);
+    }
+  };
+  ws.onerror=()=>{};
+  ws.onmessage=e=>{
+    _lastAnyData=Date.now();
+    if(e.data instanceof ArrayBuffer){
+      handleBinary(e.data);
+    }else{
+      try{
+        const msg=JSON.parse(e.data);
+        if(msg.t==='native'){
+          _nativeW=msg.w;_nativeH=msg.h;
+          resize(); // recompute scaleX/scaleY with true native resolution
+          _buildQualityMenu(msg.h);
+        }else if(msg.t==='stale'){
+          staleMs=msg.ms||0;
+        }else if(msg.t==='clipboard'){
+          // Remote clipboard → dock textarea + browser clipboard.
+          // Update _lastMacClipboard BEFORE _writeClipboard so the next
+          // async poll sees it and skips re-sending the same text back.
+          _lastMacClipboard=msg.text;
+          if(msg.seq!==undefined)_macClipboardSeq=msg.seq;
+          clipTA.value=msg.text;
+          _writeClipboard(msg.text);
+          st.textContent='[clipboard] '+msg.text.substring(0,50);
+          setTimeout(()=>{st.textContent='';},3000);
+        }else if(msg.t==='codec_error'){
+          _showError(msg.msg||'Codec unavailable');
+        }else if(msg.t==='eval'){
+          let result='';
+          try{result=String(eval(msg.js))}catch(e){result='ERR:'+String(e);}
+          send({t:'dbg_result',id:msg.id,result});
+        }
+      }catch(e){}
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Metric WebSocket — unloaded channel; echoes pings so client measures baseline RTT.
+// video_ping_rtt - metric_rtt = pure queuing delay, independent of link latency/roaming.
+// ---------------------------------------------------------------------------
+let metricWs=null,metricOpen=false,metricRtt=0;
+let metricRttWindow=[],worstMetricRtt5s=0;  // rolling 5s worst-case metric RTT
+
+function connectMetric(){
+  // Buffer mode disables /metric: when the user has explicitly accepted a
+  // buffered queue (>= 100ms), the unloaded-RTT signal would conflict with
+  // the buffer-formation we want, AND we can't be certain that the metric
+  // WS shares the SSH-tunnel TCP pipe (separate channel ≠ guaranteed
+  // separate buffer behavior under all transports). Skip it and let the
+  // server's lag-report path do all the work.
+  if((_qLagMs|0) >= 100){
+    metricOpen=false;
+    return;
+  }
+  const token=new URLSearchParams(location.search).get('token')||'';
+  const url='ws://'+location.host+'/metric'+(token?'?token='+encodeURIComponent(token):'');
+  metricWs=new WebSocket(url);
+  metricWs.onopen=()=>{
+    metricOpen=true;
+    // Send first ping immediately so metric RTT is known before the video channel needs it
+    sendMetricPing();
+  };
+  metricWs.onclose=()=>{metricOpen=false;setTimeout(connectMetric,1000);};
+  metricWs.onerror=()=>{};
+  metricWs.onmessage=e=>{
+    try{
+      const msg=JSON.parse(e.data);
+      if(msg.t==='ping'&&msg.ts){
+        metricRtt=Date.now()-msg.ts;
+        const mnow=Date.now();
+        metricRttWindow.push({ts:mnow,rtt:metricRtt});
+        metricRttWindow=metricRttWindow.filter(e=>mnow-e.ts<5000);
+        worstMetricRtt5s=metricRttWindow.length?Math.max(...metricRttWindow.map(e=>e.rtt)):metricRtt;
+        send({t:'metric_rtt',rtt_ms:metricRtt});
+      }
+    }catch(e){}
+  };
+}
+function sendMetricPing(){
+  // In buffer mode, /metric is disabled — drop any in-flight connection.
+  if((_qLagMs|0) >= 100){
+    if(metricWs){try{metricWs.close();}catch(e){} metricWs=null; metricOpen=false;}
+    return;
+  }
+  if(metricOpen&&metricWs)metricWs.send(JSON.stringify({t:'ping',ts:Date.now()}));
+  // If we left buffer mode and there's no metric ws yet, reconnect.
+  if(!metricWs && !metricOpen) connectMetric();
+}
+setInterval(sendMetricPing,2000);
+// Stall detector: server sends a heartbeat every 2s even on a static screen.
+// If we receive nothing for 15s the connection is silently dead — force reconnect.
+setInterval(()=>{
+  if(wsOpen&&Date.now()-_lastAnyData>15000){
+    console.warn('Stream stalled — reconnecting');
+    try{ws.close();}catch(e){}
+  }
+},5000);
+
+// ---------------------------------------------------------------------------
+// Mouse
+// ---------------------------------------------------------------------------
+function toVNC(cx,cy){return[Math.round((cx-ox)*scaleX),Math.round((cy-oy)*scaleY)];}
+function inBounds(vx,vy){return vx>=0&&vy>=0&&vx<_nativeW&&vy<_nativeH;}
+
+document.body.addEventListener('mousemove',e=>{
+  _syncMods(e); // catch modifier releases that the keyboard event stream missed
+  if(_plockActive){
+    // Pointer lock: use movementX/Y (relative) to update virtual remote cursor position.
+    // movementX/Y are in CSS pixels; scaleX/Y convert CSS→native coordinates.
+    _plockVX=Math.max(0,Math.min(_nativeW-1,_plockVX+e.movementX*scaleX));
+    _plockVY=Math.max(0,Math.min(_nativeH-1,_plockVY+e.movementY*scaleY));
+    send({t:'mm',x:Math.round(_plockVX),y:Math.round(_plockVY),b:mBtn});
+    return;
+  }
+  cur.style.left=e.clientX+'px';cur.style.top=e.clientY+'px';
+  const[vx,vy]=toVNC(e.clientX,e.clientY);
+  if(inBounds(vx,vy))send({t:'mm',x:vx,y:vy,b:mBtn});
+});
+canvas.addEventListener('mousedown',e=>{
+  _syncMods(e);
+  mBtn|=(1<<e.button);cur.classList.add('dn');
+  // In pointer lock mode clientX/Y are frozen; use virtual cursor position instead.
+  const[vx,vy]=_plockActive?[Math.round(_plockVX),Math.round(_plockVY)]:toVNC(e.clientX,e.clientY);
+  send({t:'md',b:e.button,x:vx,y:vy});
+  e.preventDefault();ki.focus();
+});
+// window-level mouseup catches releases that happen outside the canvas (drag-out, right-click menus, etc.)
+window.addEventListener('mouseup',e=>{
+  if(!(mBtn&(1<<e.button)))return;
+  mBtn&=~(1<<e.button);cur.classList.remove('dn');
+  const[vx,vy]=_plockActive?[Math.round(_plockVX),Math.round(_plockVY)]:toVNC(e.clientX,e.clientY);
+  send({t:'mu',b:e.button,x:vx,y:vy});
+});
+canvas.addEventListener('contextmenu',e=>e.preventDefault());
+// Wheel events come at very different magnitudes depending on input device:
+//   • Old mouse wheel (deltaMode=1): one notch = deltaY 1, mul×40 → 40 px
+//   • Trackpad pixel scroll (deltaMode=0): tiny per-frame deltas (1–10 px),
+//     including a long inertia tail of ~1 px each
+// Previous version Math.round-ed (deltaY * mul) / 80 to integer "clicks",
+// which silently dropped any deltas under 40 px. The trackpad inertia
+// tail and the small individual events were lost — only ~25% of scroll
+// intent registered. Fix: accumulate residual pixels across events,
+// emit a click when the accumulator crosses STEP. This matches how
+// browsers themselves convert smooth scrolls to discrete lines.
+let _scrollAccumX=0,_scrollAccumY=0;
+const _SCROLL_STEP_PX=40;  // pixels per emitted click; lower = more sensitive
+canvas.addEventListener('wheel',e=>{
+  const[vx,vy]=_plockActive?[Math.round(_plockVX),Math.round(_plockVY)]:toVNC(e.clientX,e.clientY);
+  const mul=e.deltaMode===1?40:e.deltaMode===2?800:1;
+  _scrollAccumY += e.deltaY * mul * _scrollMul;
+  _scrollAccumX += e.deltaX * mul * _scrollMul;
+  let cy=Math.trunc(_scrollAccumY/_SCROLL_STEP_PX);
+  let cx=Math.trunc(_scrollAccumX/_SCROLL_STEP_PX);
+  _scrollAccumY -= cy*_SCROLL_STEP_PX;
+  _scrollAccumX -= cx*_SCROLL_STEP_PX;
+  if(cy||cx){
+    cy=Math.sign(cy)*Math.min(24,Math.abs(cy));
+    cx=Math.sign(cx)*Math.min(24,Math.abs(cx));
+    send({t:'sc',x:vx,y:vy,dy:cy,dx:cx});
+  }
+  e.preventDefault();
+},{passive:false});
+
+// Touch
+let lTouch=null;
+canvas.addEventListener('touchstart',e=>{
+  lTouch=e.touches[0];ki.focus();
+  const[vx,vy]=toVNC(lTouch.clientX,lTouch.clientY);
+  send({t:'md',b:0,x:vx,y:vy});e.preventDefault();
+},{passive:false});
+canvas.addEventListener('touchmove',e=>{
+  lTouch=e.touches[0];
+  const[vx,vy]=toVNC(lTouch.clientX,lTouch.clientY);
+  send({t:'mm',x:vx,y:vy,b:1});e.preventDefault();
+},{passive:false});
+canvas.addEventListener('touchend',e=>{
+  if(lTouch){const[vx,vy]=toVNC(lTouch.clientX,lTouch.clientY);send({t:'mu',b:0,x:vx,y:vy});}
+  e.preventDefault();
+},{passive:false});
+
+// ---------------------------------------------------------------------------
+// Keyboard — captured on hidden textarea
+// ---------------------------------------------------------------------------
+
+// Send text to be pasted on the remote. typeChars=true asks the server to type
+// the text character-by-character via VNC keysyms — set ONLY by the dock
+// "Paste remote" button. Server may honour the flag by typing characters
+// (for example, a VNC pass-through backend); the normal paste path is unchanged.
+function sendPasteText(text, typeChars){
+  if(text&&wsOpen){
+    _lastMacClipboard=text; // optimistic: prevent the server-echo from looping back
+    const m={t:'paste',text};
+    if(typeChars)m.type_chars=true;
+    if(_macClipboardSeq>=0)m.mac_rev=_macClipboardSeq; // let server reject stale pastes
+    send(m);
+  }
+}
+
+// Write text to the browser's local clipboard.
+//
+// Safari (and to some extent Firefox) blocks navigator.clipboard.writeText()
+// outside a user-gesture context. WS messages arrive on a background task,
+// so the direct call rejects with NotAllowedError. document.execCommand('copy')
+// has the same restriction in Safari, so the legacy fallback isn't useful.
+//
+// Strategy: try the direct call (works on Chrome immediately). If it rejects
+// (Safari path), queue the text and flush on the next user gesture — any
+// pointerdown/keydown re-runs writeText with that gesture authorising the
+// call. The newest-wins queue handles rapid remote-side clipboard changes.
+let _pendingClipWrite = '';
+function _writeClipboard(text){
+  if(!text)return;
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(text).catch(()=>{_pendingClipWrite=text;});
+  }else{
+    _pendingClipWrite=text;
+  }
+}
+function _flushPendingClipWrite(){
+  if(!_pendingClipWrite)return;
+  if(!navigator.clipboard||!navigator.clipboard.writeText)return;
+  const t=_pendingClipWrite;
+  _pendingClipWrite='';
+  navigator.clipboard.writeText(t).catch(()=>{
+    // Permission still denied — re-queue (only if newer text didn't arrive).
+    if(!_pendingClipWrite)_pendingClipWrite=t;
+  });
+}
+// Capture-phase so the flush runs even if the inner handler stops propagation.
+['pointerdown','keydown','focus'].forEach(ev=>
+  window.addEventListener(ev,_flushPendingClipWrite,true));
+
+// Super/Cmd/Ctrl+C path: Safari fires a native copy event on the focused ki
+// textarea (because keydown didn't preventDefault — see handler above). The
+// copy event runs in a user-gesture context, so setData() always succeeds.
+// We override clipboardData with the latest remote clipboard text so that the
+// user can paste it anywhere — including back into the host OS that's
+// running Safari (its system clipboard tracks Safari's clipboard).
+document.addEventListener('copy',e=>{
+  if(_lastMacClipboard&&e.clipboardData){
+    e.clipboardData.setData('text/plain',_lastMacClipboard);
+    e.preventDefault();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Async clipboard permission + bidirectional sync (browser-agnostic)
+//
+// clipSynced=true only when navigator.clipboard.readText() has a persistent
+// grant (permission.state==='granted') or no Permissions API exists and a
+// live readText() call succeeds.  Firefox shows a per-call paste button that
+// never becomes 'granted', so clipSynced stays false there — CTRL+V via the
+// ki paste event is the working path.  Chrome grants persistently after one
+// dialog, making full background sync possible.
+// ---------------------------------------------------------------------------
+
+async function _checkClipboardPermission(){
+  if(!navigator.clipboard||!navigator.clipboard.readText)return;
+  try{
+    let perm=null;
+    if(navigator.permissions){
+      try{perm=await navigator.permissions.query({name:'clipboard-read'});}catch(e){}
+      if(perm){
+        // Free event hook — no polling; reacts instantly if user toggles in browser settings
+        perm.onchange=()=>{
+          clipSynced=(perm.state==='granted');
+          if(clipSynced)_startClipPoll();else _stopClipPoll();
+        };
+        if(perm.state==='granted'){clipSynced=true;_startClipPoll();return;}
+        if(perm.state==='denied')return; // hard-denied; CTRL+V fallback only
+        // 'prompt': fall through — try readText() once to trigger the dialog
+      }
+    }
+    // One-time readText() attempt: shows permission dialog on Chrome, a one-time
+    // paste button on Firefox.  NOT called repeatedly — Firefox's per-call button
+    // would be too intrusive if polled every second.
+    const text=await navigator.clipboard.readText();
+    // Check whether we now have a persistent grant
+    let granted=false;
+    if(perm){
+      granted=(perm.state==='granted'); // Firefox stays 'prompt' — don't poll
+    }else{
+      granted=true; // no Permissions API; readText() succeeded → trust it
+    }
+    if(granted){
+      clipSynced=true;
+      _startClipPoll();
+      // Immediately push browser clipboard to remote (user just connected/refocused)
+      if(text&&text!==_lastMacClipboard&&wsOpen){_lastMacClipboard=text;send({t:'setclip',text});}
+    }
+  }catch(e){
+    clipSynced=false; // denied or unsupported; silent fallback
+  }
+}
+
+function _startClipPoll(){
+  if(_clipPollTimer)return;
+  _clipPollTimer=setInterval(_pollBrowserClipboard,1000);
+}
+function _stopClipPoll(){
+  if(_clipPollTimer){clearInterval(_clipPollTimer);_clipPollTimer=null;}
+}
+
+// Push browser clipboard to remote if it has changed. Called every 1s (only
+// when clipSynced and tab is genuinely focused) and immediately on focus/connect.
+// IMPORTANT: Chrome requires document.hasFocus() — not just !document.hidden.
+// A visible-but-unfocused tab throws "Document is not focused" from readText(),
+// which must NOT be treated as permission revocation.
+async function _pollBrowserClipboard(){
+  if(!clipSynced||!wsOpen||!document.hasFocus())return;
+  try{
+    const text=await navigator.clipboard.readText();
+    if(text&&text!==_lastMacClipboard){_lastMacClipboard=text;send({t:'setclip',text});}
+  }catch(e){
+    // Only treat as revocation if we still have focus — a focus-loss race can
+    // produce "Document is not focused" even though permission is intact.
+    if(document.hasFocus()){clipSynced=false;_stopClipPoll();}
+  }
+}
+
+ki.addEventListener('keydown',async e=>{
+  let code=e.code,key=e.key;
+  // Ctrl→Super: remap ControlLeft/Right → MetaLeft.
+  if(ctrlToMeta&&!e.metaKey&&(code==='ControlLeft'||code==='ControlRight')){
+    _ctrlRemapped[code]='MetaLeft';
+    _heldKeys.add(code); // tracked under physical code so _syncMods can release it
+    code=key='MetaLeft';
+    send({t:'kd',k:key,code:code});
+    e.preventDefault(); // prevent browser Ctrl+key shortcuts (zoom, find, etc.)
+    return;
+  }
+  // Ctrl+V / Cmd+V: let the browser fire a native paste event on ki (no permission needed).
+  // document paste listener captures e.clipboardData and sends {t:"paste"} to remote.
+  // Crucially: do NOT call e.preventDefault() here — that would block the paste event.
+  if((e.ctrlKey||e.metaKey)&&key.toLowerCase()==='v'){
+    _suppressedKd.add(e.code); // suppress matching keyup
+    return; // don't send V to VNC; paste event handles the rest
+  }
+  // Super/Cmd/Ctrl+C: forward to remote (so the remote app copies its selection
+  // into the remote clipboard) AND let the native copy event fire on ki so
+  // the document copy listener can populate Safari's local clipboard with
+  // _lastMacClipboard. preventDefault() would suppress the native copy
+  // event — Safari then never gets the text into its own clipboard, which
+  // is the bug we're fixing here.
+  if((e.ctrlKey||e.metaKey)&&key.toLowerCase()==='c'){
+    _heldKeys.add(e.code);
+    send({t:'kd',k:key,code:code});
+    return;
+  }
+  _heldKeys.add(e.code);
+  send({t:'kd',k:key,code:code});
+  e.preventDefault();
+  // After our send, reconcile against the OS-reported modifier state so any
+  // modifier whose release we missed gets released to the remote side now.
+  _syncMods(e);
+});
+ki.addEventListener('keyup',e=>{
+  let code=e.code,key=e.key;
+  _heldKeys.delete(e.code);
+  if(_ctrlRemapped[e.code]){code=key=_ctrlRemapped[e.code];delete _ctrlRemapped[e.code];}
+  // Suppress keyup for any key whose keydown was intercepted (e.g. V after Ctrl+V paste).
+  // Must check e.code (physical key) not key, because modifier state may have changed.
+  if(_suppressedKd.has(e.code)){_suppressedKd.delete(e.code);e.preventDefault();_syncMods(e);return;}
+  // Belt-and-suspenders: also suppress if modifier still held (catches cases where
+  // the keydown wasn't tracked but modifier is clearly still active).
+  if((e.ctrlKey||e.metaKey)&&key.toLowerCase()==='v'){e.preventDefault();_syncMods(e);return;}
+  send({t:'ku',k:key,code:code});
+  e.preventDefault();
+  _syncMods(e);
+});
+
+// Document-level paste fallback (when dock or other UI has focus)
+document.addEventListener('paste',e=>{
+  if(document.activeElement===clipTA)return; // let user paste into clipboard textarea
+  const text=(e.clipboardData||window.clipboardData||{}).getData('text/plain');
+  if(text&&wsOpen){sendPasteText(text);e.preventDefault();}
+});
+
+// Refocus hidden textarea on canvas click and window focus so keyboard events route correctly.
+// On window focus: if clipboard is synced, immediately push browser clipboard to remote so the
+// user's client-side clipboard is authoritative after switching back to this tab.
+canvas.addEventListener('click',()=>ki.focus());
+window.addEventListener('focus',()=>{ki.focus();if(clipSynced)_pollBrowserClipboard();});
+
+// ---------------------------------------------------------------------------
+// Dock UI
+// ---------------------------------------------------------------------------
+const dock=document.getElementById('dock');
+const dockTab=document.getElementById('dock-tab');
+function dockOpen(o){
+  dock.classList.toggle('open',o);
+  dock.classList.toggle('closed',!o);
+  dockTab.textContent=o?'<':'>';
+}
+dockTab.addEventListener('click',()=>dockOpen(true));
+document.getElementById('dock-close').addEventListener('click',()=>{dockOpen(false);ki.focus();});
+
+const _LOCK_KEYS=['Escape','Tab','F1','F2','F3','F4','F5','F6','F7','F8','F9','F10','F11','F12'];
+document.addEventListener('fullscreenchange',async()=>{
+  if(document.fullscreenElement){
+    try{if(navigator.keyboard)await navigator.keyboard.lock(_LOCK_KEYS);}catch(e){}
+    ki.focus();
+  }else{
+    try{if(navigator.keyboard)navigator.keyboard.unlock();}catch(e){}
+    // If emulated pointer lock was active (fullscreen-only path), exit it.
+    if(_plockActive&&!_plockSupported)_plockExit();
+  }
+  _updatePlockBtn();
+});
+document.getElementById('btn-fs').addEventListener('click',()=>{
+  if(!document.fullscreenElement)document.documentElement.requestFullscreen().catch(()=>{});
+  else document.exitFullscreen().catch(()=>{});
+  ki.focus();
+});
+
+const btnFit=document.getElementById('btn-fit');
+btnFit.addEventListener('click',()=>{
+  fitMode=fitMode==='fit'?'cover':'fit';
+  btnFit.textContent=fitMode==='cover'?'Fill screen':'Fit screen';
+  btnFit.classList.toggle('active',fitMode==='cover');
+  resize();ki.focus();
+});
+
+// ---------------------------------------------------------------------------
+// Hide cursor toggle
+// ---------------------------------------------------------------------------
+const btnHideCursor=document.getElementById('btn-hide-cursor');
+function _applyHideCursor(){
+  // Apply or remove cursor:none. Pointer lock also hides cursor; this is orthogonal.
+  const hide=_hideCursor||_plockActive;
+  canvas.style.cursor=hide?'none':'';
+  document.body.style.cursor=hide?'none':'';
+  cur.style.display=hide?'none':'';
+}
+btnHideCursor.addEventListener('click',()=>{
+  _hideCursor=!_hideCursor;
+  btnHideCursor.textContent='Hide cursor ['+ (_hideCursor?'on':'off')+']';
+  btnHideCursor.classList.toggle('active',_hideCursor);
+  _applyHideCursor();
+  ki.focus();
+});
+
+// ---------------------------------------------------------------------------
+// Pointer lock — real API when supported; emulated (movementX/Y) in fullscreen
+// ---------------------------------------------------------------------------
+function _updatePlockBtn(){
+  const btn=document.getElementById('btn-plock');
+  // Show if real pointer lock is supported, or if we're in fullscreen (emulated mode).
+  const visible=_plockSupported||!!document.fullscreenElement;
+  btn.style.display=visible?'':'none';
+  btn.textContent='Pointer lock ['+ (_plockActive?'on':'off')+']';
+  btn.classList.toggle('active',_plockActive);
+}
+function _plockEnter(){
+  if(_plockSupported){
+    canvas.requestPointerLock();  // pointerlockchange event will set _plockActive
+  }else if(document.fullscreenElement){
+    // Emulated: hide cursor + track movementX/Y; mouse can't escape fullscreen.
+    _plockActive=true;
+    _plockVX=_nativeW/2;_plockVY=_nativeH/2;
+    _applyHideCursor();
+    dockOpen(false);
+    _updatePlockBtn();
+  }
+}
+function _plockExit(){
+  if(_plockSupported&&document.pointerLockElement){
+    document.exitPointerLock();  // pointerlockchange will clean up
+  }else if(_plockActive){
+    _plockActive=false;
+    _applyHideCursor();
+    _updatePlockBtn();
+  }
+}
+// Real pointer lock: browser fires this on acquire and release.
+document.addEventListener('pointerlockchange',()=>{
+  _plockActive=!!document.pointerLockElement;
+  if(_plockActive){
+    _plockVX=_nativeW/2;_plockVY=_nativeH/2;
+    dockOpen(false);
+  }
+  _applyHideCursor();
+  _updatePlockBtn();
+});
+document.getElementById('btn-plock').addEventListener('click',()=>{
+  if(_plockActive)_plockExit();else _plockEnter();
+  ki.focus();
+});
+// Prevent dock from opening while pointer lock is active (all DOM blocked per spec).
+dockTab.addEventListener('click',e=>{if(_plockActive){e.stopImmediatePropagation();}},{capture:true});
+
+const btnCtrl=document.getElementById('btn-ctrl');
+// Sync button label to initial state.
+btnCtrl.textContent='Ctrl=Super ['+(ctrlToMeta?'on':'off')+']';
+btnCtrl.classList.toggle('active',ctrlToMeta);
+btnCtrl.addEventListener('click',()=>{
+  ctrlToMeta=!ctrlToMeta;
+  _ctrlRemapped={};  // clear any in-flight remaps
+  _suppressedKd.clear();
+  btnCtrl.textContent='Ctrl=Super ['+(ctrlToMeta?'on':'off')+']';
+  btnCtrl.classList.toggle('active',ctrlToMeta);
+  ki.focus();
+});
+
+const btnSk=document.getElementById('btn-sk');
+const skMenu=document.getElementById('sk-menu');
+const clipTA=document.getElementById('clip-ta');
+btnSk.addEventListener('click',()=>{
+  const show=skMenu.classList.toggle('show');
+  btnSk.classList.toggle('active',show);
+});
+
+function sendSpecial(pairs){
+  for(const[k,down]of pairs)send({t:down?'kd':'ku',k,code:k});
+}
+document.getElementById('sk-spotlight').addEventListener('click',()=>{
+  sendSpecial([['MetaLeft',true],[' ',true],[' ',false],['MetaLeft',false]]);ki.focus();
+});
+document.getElementById('sk-appsw').addEventListener('click',()=>{
+  sendSpecial([['MetaLeft',true],['Tab',true],['Tab',false],['MetaLeft',false]]);ki.focus();
+});
+document.getElementById('sk-quit').addEventListener('click',()=>{
+  sendSpecial([['MetaLeft',true],['q',true],['q',false],['MetaLeft',false]]);ki.focus();
+});
+document.getElementById('sk-esc').addEventListener('click',()=>{
+  sendSpecial([['Escape',true],['Escape',false]]);ki.focus();
+});
+document.getElementById('sk-tab').addEventListener('click',()=>{
+  sendSpecial([['Tab',true],['Tab',false]]);ki.focus();
+});
+document.getElementById('sk-f11').addEventListener('click',()=>{
+  sendSpecial([['F11',true],['F11',false]]);ki.focus();
+});
+document.getElementById('sk-f12').addEventListener('click',()=>{
+  sendSpecial([['F12',true],['F12',false]]);ki.focus();
+});
+document.getElementById('sk-cad').addEventListener('click',()=>{
+  sendSpecial([['ControlLeft',true],['AltLeft',true],['Delete',true],
+               ['Delete',false],['AltLeft',false],['ControlLeft',false]]);ki.focus();
+});
+document.getElementById('sk-ctrlc').addEventListener('click',()=>{
+  sendSpecial([['ControlLeft',true],['c',true],['c',false],['ControlLeft',false]]);ki.focus();
+});
+document.getElementById('sk-ctrlz').addEventListener('click',()=>{
+  sendSpecial([['ControlLeft',true],['z',true],['z',false],['ControlLeft',false]]);ki.focus();
+});
+document.getElementById('sk-ctrld').addEventListener('click',()=>{
+  sendSpecial([['ControlLeft',true],['d',true],['d',false],['ControlLeft',false]]);ki.focus();
+});
+document.getElementById('sk-zoom-in').addEventListener('click',()=>{
+  sendSpecial([['MetaLeft',true],['=',true],['=',false],['MetaLeft',false]]);ki.focus();
+});
+document.getElementById('sk-zoom-out').addEventListener('click',()=>{
+  sendSpecial([['MetaLeft',true],['-',true],['-',false],['MetaLeft',false]]);ki.focus();
+});
+document.getElementById('sk-redo').addEventListener('click',()=>{
+  sendSpecial([['MetaLeft',true],['ShiftLeft',true],['z',true],['z',false],['ShiftLeft',false],['MetaLeft',false]]);ki.focus();
+});
+
+// Custom key sender: modifier checkboxes + key input
+document.getElementById('sk-key-input').addEventListener('keydown',e=>{
+  if(e.key!=='Enter')return;
+  e.preventDefault();
+  const raw=e.target.value.trim();
+  if(!raw)return;
+  const mods=[];
+  if(document.getElementById('mod-shift').checked)mods.push('ShiftLeft');
+  if(document.getElementById('mod-ctrl').checked)mods.push('ControlLeft');
+  if(document.getElementById('mod-alt').checked)mods.push('AltLeft');
+  if(document.getElementById('mod-cmd').checked)mods.push('MetaLeft');
+  const dn=mods.map(m=>[m,true]);
+  const up=mods.slice().reverse().map(m=>[m,false]);
+  sendSpecial([...dn,[raw,true],[raw,false],...up]);
+  e.target.value='';
+  ki.focus();
+});
+
+// Clipboard textarea — paste remote button
+document.getElementById('clip-paste').addEventListener('click',()=>{
+  const text=clipTA.value;
+  // typeChars=true: server can use direct character typing for backends where
+  // clipboard paste is unavailable.
+  // the server may type characters directly for backends that request it. This is the
+  // ONLY caller that sets the flag; the canvas paste keystroke path leaves
+  // it unset so the normal clipboard paste path is untouched.
+  if(text&&wsOpen){sendPasteText(text,true);st.textContent='Pasted '+text.length+' chars';}
+  ki.focus();
+});
+document.getElementById('clip-clear').addEventListener('click',()=>{clipTA.value='';ki.focus();});
+
+// Bidirectional sync: when user edits clipTA, update remote clipboard AND browser clipboard
+// (debounced 400ms). Keeping both in sync means Ctrl+V always sends what the textarea shows,
+// eliminating the stale-browser-clipboard paste bug.
+let _clipTATimer=null;
+clipTA.addEventListener('input',()=>{
+  clearTimeout(_clipTATimer);
+  _clipTATimer=setTimeout(()=>{
+    const text=clipTA.value;
+    if(wsOpen){_lastMacClipboard=text;send({t:'setclip',text});}
+    _writeClipboard(text); // keep browser clipboard in sync so Ctrl+V sends this text
+  },400);
+});
+
+// ---------------------------------------------------------------------------
+// Init + visibility-based disconnect
+// ---------------------------------------------------------------------------
+document.addEventListener('visibilitychange',()=>{
+  if(document.hidden){
+    // Tab hidden: keyup events for held modifiers won't fire while we're in
+    // the background, so flush server-side state now to avoid stuck-key on
+    // return. Same as the blur path; both fire on Super/Cmd+Tab on some browsers.
+    if(wsOpen)send({t:'reset'});
+    _heldKeys.clear();_ctrlRemapped={};
+    // Disconnect after 30s hidden to save bandwidth
+    _hiddenTimer=setTimeout(()=>{
+      if(document.hidden){
+        _suppressReconnect=true;
+        if(ws&&wsOpen)ws.close(1000,'tab-idle');
+      }
+    },30000);
+  }else{
+    clearTimeout(_hiddenTimer);_hiddenTimer=null;
+    if(_suppressReconnect){
+      _suppressReconnect=false;
+      connect();
+    }else if(wsOpen){
+      send({t:'reset'});
+      if(clipSynced)_pollBrowserClipboard(); // push browser clipboard to remote immediately
+    }
+    ki.focus();
+  }
+});
+window.addEventListener('blur',()=>{
+  if(wsOpen)send({t:'reset'});
+  _heldKeys.clear();_ctrlRemapped={};
+});
+// ---------------------------------------------------------------------------
+// Audio — opt-in, separate WebSocket, stays alive when tab is hidden
+// ---------------------------------------------------------------------------
+let _audioEnabled=(()=>{const m=document.cookie.match(/mvs_audio=(\d)/);return m?m[1]==='1':false;})();
+let _audioWs=null,_audioWsOpen=false;
+let _audioCtx=null,_audioDecoder=null;
+let _nextAudioTime=0;
+
+// Adaptive jitter buffer.
+//   target = max(user_buffer | AUDIO_FLOOR, 4×σ_jitter), capped at MAX.
+// In responsive mode the floor is 250ms (no gaming on this product;
+// 250ms is comfortable, eliminates the 120ms-floor underrun glitches).
+// In buffer mode the user-set video buffer is the floor — so audio and
+// video are pinned to the same latency and stay in lockstep through
+// roams. Audio jitter EWA can still push higher if the link demands.
+const _AUDIO_FLOOR_MS    = 250;     // floor in responsive mode
+const _AUDIO_MAX_LATENCY = 4.000;   // hard ceiling: reset if queue grows past 4s
+let _audioLastArrival = 0;          // AudioContext time of previous packet arrival
+let _audioJitterEwa   = 0.060;      // EWA of inter-arrival jitter (σ estimate)
+function _audioTargetLatency(){
+  const userMs = (_qLagMs|0);
+  const floorMs = userMs >= 100 ? userMs : _AUDIO_FLOOR_MS;
+  // 4σ covers >99% of arrivals under a Gaussian jitter model
+  return Math.min(_AUDIO_MAX_LATENCY, Math.max(floorMs/1000, 4 * _audioJitterEwa));
+}
+
+function _audioSupported(){
+  return typeof AudioDecoder!=='undefined'&&typeof AudioContext!=='undefined';
+}
+
+function _onAudioFrame(audioData){
+  if(!_audioCtx||!_audioEnabled){try{audioData.close();}catch(e){}return;}
+  try{
+    const nCh=audioData.numberOfChannels,nSam=audioData.numberOfFrames,sr=audioData.sampleRate;
+    const buf=_audioCtx.createBuffer(nCh,nSam,sr);
+    for(let ch=0;ch<nCh;ch++){
+      const dst=buf.getChannelData(ch);
+      audioData.copyTo(dst,{planeIndex:ch,format:'f32-planar'});
+    }
+    audioData.close();
+    const now=_audioCtx.currentTime;
+    // Update inter-arrival jitter estimate (EWA with α=0.1)
+    if(_audioLastArrival>0){
+      const interArrival=now-_audioLastArrival;
+      const expectedInterval=buf.duration;
+      const jitter=Math.abs(interArrival-expectedInterval);
+      _audioJitterEwa=_audioJitterEwa*0.9+jitter*0.1;
+    }
+    _audioLastArrival=now;
+    // Keep latency pinned to adaptive target; reset on underrun or runaway.
+    // On underrun, also bump the jitter estimate so the recovery target is
+    // bigger than the gap that caused the underrun — without this we keep
+    // resetting to the same too-small buffer and re-underrun on every jitter
+    // spike (the "constant disconnection" sound).
+    if(_nextAudioTime<now||_nextAudioTime-now>_AUDIO_MAX_LATENCY){
+      _audioJitterEwa=Math.max(_audioJitterEwa,0.080);   // floor σ at 80ms after underrun
+    }
+    const target=_audioTargetLatency();
+    if(_nextAudioTime<now||_nextAudioTime-now>_AUDIO_MAX_LATENCY){
+      _nextAudioTime=now+target;
+    }
+    const src=_audioCtx.createBufferSource();
+    src.buffer=buf;
+    src.connect(_audioCtx.destination);
+    src.start(_nextAudioTime);
+    _nextAudioTime+=buf.duration;
+  }catch(e){try{audioData.close();}catch(e2){}}
+}
+
+function _initAudioDecoder(){
+  if(_audioDecoder){try{_audioDecoder.close();}catch(e){}}
+  _audioDecoder=null;
+  if(!_audioSupported())return;
+  try{
+    _audioDecoder=new AudioDecoder({
+      output:_onAudioFrame,
+      error:e=>console.warn('AudioDecoder:',e),
+    });
+    _audioDecoder.configure({codec:'opus',sampleRate:48000,numberOfChannels:2});
+  }catch(e){
+    console.warn('AudioDecoder configure failed:',e);
+    _audioDecoder=null;
+  }
+}
+
+function _handleAudioPacket(buf){
+  if(!_audioDecoder||_audioDecoder.state==='closed')return;
+  try{
+    const v=new DataView(buf);
+    // timestamp: 8-byte uint64 big-endian (high 32 + low 32 to avoid BigInt dependency)
+    const ts_us=v.getUint32(0)*4294967296+v.getUint32(4);
+    const opus=buf.slice(8);
+    _audioDecoder.decode(new EncodedAudioChunk({type:'key',timestamp:ts_us,data:opus}));
+  }catch(e){}
+}
+
+function connectAudio(){
+  if(!_audioEnabled||!_audioSupported())return;
+  if(_audioWs){try{_audioWs.close();}catch(e){}}
+  const token=new URLSearchParams(location.search).get('token')||'';
+  const url='ws://'+location.host+'/audio'+(token?'?token='+encodeURIComponent(token):'');
+  _audioWs=new WebSocket(url);
+  _audioWs.binaryType='arraybuffer';
+  _audioWs.onopen=()=>{
+    _audioWsOpen=true;
+    // AudioContext must be created/resumed on a user gesture; the button click counts.
+    if(!_audioCtx)_audioCtx=new AudioContext({sampleRate:48000,latencyHint:'interactive'});
+    if(_audioCtx.state==='suspended')_audioCtx.resume().catch(()=>{});
+    _nextAudioTime=0;
+    _initAudioDecoder();
+  };
+  _audioWs.onclose=()=>{
+    _audioWsOpen=false;
+    if(_audioEnabled)setTimeout(connectAudio,2000);  // auto-reconnect
+  };
+  _audioWs.onerror=()=>{};
+  _audioWs.onmessage=e=>{
+    if(e.data instanceof ArrayBuffer)_handleAudioPacket(e.data);
+  };
+}
+
+function disconnectAudio(){
+  if(_audioWs){try{_audioWs.close();}catch(e){}_audioWs=null;}
+  _audioWsOpen=false;
+  if(_audioDecoder){try{_audioDecoder.close();}catch(e){}_audioDecoder=null;}
+}
+
+const btnAudio=document.getElementById('btn-audio');
+if(!_audioSupported()){
+  btnAudio.disabled=true;
+  btnAudio.title='Audio requires WebCodecs (Chrome/Edge/Safari 16.4+)';
+}
+function _syncAudioBtn(){
+  btnAudio.textContent='Audio ['+ (_audioEnabled?'on':'off')+']';
+  btnAudio.classList.toggle('active',_audioEnabled);
+}
+_syncAudioBtn();
+btnAudio.addEventListener('click',()=>{
+  if(!_audioSupported()){ki.focus();return;}
+  _audioEnabled=!_audioEnabled;
+  document.cookie='mvs_audio='+(_audioEnabled?'1':'0')+';max-age='+(365*86400)+';SameSite=Strict';
+  _syncAudioBtn();
+  if(_audioEnabled)connectAudio();else disconnectAudio();
+  ki.focus();
+});
+// Auto-connect on load if cookie is on (AudioContext will resume on first interaction).
+if(_audioEnabled)connectAudio();
+
+_updatePlockBtn(); // set initial visibility based on browser pointer lock support
+resize();connect();connectMetric();
+</script></body></html>

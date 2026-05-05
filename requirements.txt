@@ -1,0 +1,9 @@
+websockets>=13.0
+numpy>=1.24
+Pillow>=10.0
+cryptography>=41.0
+av>=12.0              # PyAV: H.264/H.265/AV1/VP9 via FFmpeg — strongly recommended
+PyTurboJPEG>=1.7.0   # optional: faster JPEG when av unavailable
+mss>=9.0.1            # X11/Windows full-screen capture
+python-xlib>=0.33; platform_system != "Windows"
+pyperclip>=1.8.2

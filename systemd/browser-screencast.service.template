@@ -1,0 +1,11 @@
+[Unit]
+Description=browser-screencast server
+After=graphical-session.target
+
+[Service]
+ExecStart=__BIN__ --listen 127.0.0.1 --port __PORT__
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
