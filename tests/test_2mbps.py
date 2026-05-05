@@ -15,7 +15,7 @@ The server receives realistic lag reports and its congestion controller must:
 Usage:
   python3 tests/test_2mbps.py [port] [token] [min_fps] [min_mbps]
 """
-import asyncio, json, struct, sys, time
+import asyncio, json, os, struct, sys, time
 
 try:
     from cpu_sampler import CpuSampler
@@ -29,11 +29,11 @@ PORT        = int(sys.argv[1])   if len(sys.argv) > 1 else 6081
 TOKEN       = sys.argv[2]        if len(sys.argv) > 2 else ""
 MIN_FPS     = float(sys.argv[3]) if len(sys.argv) > 3 else 2.0
 MIN_MBPS    = float(sys.argv[4]) if len(sys.argv) > 4 else 0.0   # 0 = no check
-RATE_BPS    = 2_000_000   # simulated 2 Mbps downstream
-DURATION    = 90.0        # total test duration (seconds) — bumped to 90s to give
+RATE_BPS    = int(os.environ.get("RATE_BPS", "2000000"))   # simulated downstream
+DURATION    = float(os.environ.get("DURATION", "90.0"))     # total test duration (seconds) — bumped to 90s to give
                           # the controller a clean 50s steady-state window after
                           # the 40s adaptation/recovery period.
-WARMUP_S    = 40.0        # ignore lag/bitrate during initial ramp-up/settle.
+WARMUP_S    = float(os.environ.get("WARMUP_S", "40.0"))     # ignore lag/bitrate during initial ramp-up/settle.
                           # On loopback throttle the controller can take ~35-37s
                           # to fully drain the initial backpressure spike (lag
                           # peaks around 2.8s at t≈25-30s, then drops to ≤1ms by
@@ -42,7 +42,10 @@ WARMUP_S    = 40.0        # ignore lag/bitrate during initial ramp-up/settle.
                           # equilibrium, not the recovery dip itself. The same
                           # controller settles in <1s on real WAN paths (see
                           # CLAUDE.md ▸ "Validated under" 161ms-RTT test).
-MAX_LAG_MS  = 2000        # steady-state max lag (after warmup)
+MAX_LAG_MS  = int(os.environ.get("MAX_LAG_MS", "2000"))     # steady-state max lag (after warmup)
+TAIL_S      = float(os.environ.get("TAIL_S", "15.0"))
+MIN_PEAK_LAG_MS = int(os.environ.get("MIN_PEAK_LAG_MS", "0"))
+ALLOW_CPU_EXEMPTIONS = os.environ.get("ALLOW_CPU_EXEMPTIONS", "0") == "1"
 
 WS_URL = f"ws://{HOST}:{PORT}/" + (f"?token={TOKEN}" if TOKEN else "")
 RATE   = RATE_BPS / 8     # bytes per second
@@ -66,7 +69,8 @@ async def main():
     lag_samples = []
     steady_bytes = 0   # bytes received after warmup (whole-window avg)
     tail_bytes   = 0   # bytes received in last TAIL_S — post-recovery equilibrium
-    TAIL_S       = 15.0
+    max_lag_all = 0
+    max_lag_warmup = 0
     start_mono = time.monotonic()
     last_lag_sent = 0.0
     disconnected = False
@@ -119,6 +123,9 @@ async def main():
                 # Lag = (virtual arrival time) - (server send time).
                 # This matches exactly what the browser measures: frame age at decode time.
                 lag_ms = max(1, int(virtual_t * 1000) - ts_ms)
+                max_lag_all = max(max_lag_all, lag_ms)
+                if elapsed_mono < WARMUP_S:
+                    max_lag_warmup = max(max_lag_warmup, lag_ms)
 
                 # Send lag report at ~10/s (matching browser rate)
                 now_t = time.monotonic()
@@ -154,6 +161,7 @@ async def main():
     print(f"  frames={frames}  avg_fps={avg_fps:.1f}  disconnected={disconnected}")
     print(f"  steady-state (after {WARMUP_S}s warmup):")
     print(f"    lag  max={max_lag_steady}ms  avg={avg_lag:.0f}ms  samples={len(lag_samples)}")
+    print(f"    lag  peak_all={max_lag_all}ms  peak_warmup={max_lag_warmup}ms")
     print(f"    link avg     ={avg_mbps:.2f}Mbps  (bytes={steady_bytes}  t={steady_s:.1f}s)")
     print(f"    link last{int(TAIL_S)}s={tail_mbps:.2f}Mbps  (post-recovery equilibrium)")
     print(f"  CPU peaks: {cpu.summary()}")
@@ -164,11 +172,11 @@ async def main():
     if max_lag_steady > MAX_LAG_MS:
         failures.append(f"max lag {max_lag_steady}ms > {MAX_LAG_MS}ms limit")
     if avg_fps < MIN_FPS:
-        if cpu.saturated:
+        if ALLOW_CPU_EXEMPTIONS and cpu.saturated:
             print(f"  NOTE: avg fps {avg_fps:.1f} < {MIN_FPS} but CPU saturated "
                   f"({cpu.summary()}) — runner is the bottleneck, not the system. "
                   "fps bar exempted.")
-        elif cpu.runner_capped:
+        elif ALLOW_CPU_EXEMPTIONS and cpu.runner_capped:
             print(f"  NOTE: avg fps {avg_fps:.1f} < {MIN_FPS} but CPU has clear headroom "
                   f"({cpu.summary()}) — capture backend cannot deliver more frames. "
                   "fps bar exempted.")
@@ -187,11 +195,11 @@ async def main():
     # the fps bar in that case; same exemption applies here for the same
     # reason.
     if MIN_MBPS > 0 and tail_mbps < MIN_MBPS:
-        if cpu.saturated:
+        if ALLOW_CPU_EXEMPTIONS and cpu.saturated:
             print(f"  NOTE: tail link {tail_mbps:.2f}Mbps < {MIN_MBPS} but CPU "
                   f"saturated ({cpu.summary()}) — runner couldn't generate enough "
                   "frames to fill the link. Bandwidth bar exempted.")
-        elif cpu.runner_capped:
+        elif ALLOW_CPU_EXEMPTIONS and cpu.runner_capped:
             print(f"  NOTE: tail link {tail_mbps:.2f}Mbps < {MIN_MBPS} but CPU "
                   f"runner-capped ({cpu.summary()}) — capture could not keep up. "
                   "Bandwidth bar exempted.")
@@ -200,6 +208,9 @@ async def main():
                             f"(controller didn't reach equilibrium near link cap; "
                             f"whole-window avg was {avg_mbps:.2f}Mbps; "
                             f"CPU: {cpu.summary()})")
+    if MIN_PEAK_LAG_MS > 0 and max_lag_all < MIN_PEAK_LAG_MS:
+        failures.append(f"peak lag {max_lag_all}ms < {MIN_PEAK_LAG_MS}ms; "
+                        "fixture did not stress the controller enough")
 
     if failures:
         print(f"\nFAIL:")

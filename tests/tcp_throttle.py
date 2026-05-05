@@ -88,20 +88,34 @@ async def _throttled(src: asyncio.StreamReader, dst: asyncio.StreamWriter,
     tokens = 0.0
     last_t = time.monotonic()
     total  = 0
+    q = asyncio.Queue()
 
+    async def reader():
+        global _queued_bytes, _buf_overruns
+        try:
+            while True:
+                chunk = await src.read(65536)
+                if not chunk:
+                    break
+                _queued_bytes += len(chunk)
+                if _queued_bytes > MAX_BUF:
+                    _buf_overruns += 1
+                    print(f"  [{tag}] BUF OVERRUN {_queued_bytes/1024/1024:.1f}MB "
+                          f"> {args.max_buf}MB — backpressure would reach the server",
+                          flush=True)
+                await q.put(chunk)
+        except (ConnectionResetError, BrokenPipeError, asyncio.IncompleteReadError):
+            pass
+        finally:
+            await q.put(None)
+
+    reader_task = asyncio.create_task(reader())
     try:
         while True:
-            chunk = await src.read(65536)
-            if not chunk:
+            chunk = await q.get()
+            if chunk is None:
+                await reader_task
                 break
-
-            # --- Backpressure guard -----------------------------------------
-            _queued_bytes += len(chunk)
-            if _queued_bytes > MAX_BUF:
-                _buf_overruns += 1
-                print(f"  [{tag}] BUF OVERRUN {_queued_bytes/1024/1024:.1f}MB "
-                      f"> {args.max_buf}MB — backpressure is reaching the server",
-                      flush=True)
 
             # --- Rate limit -------------------------------------------------
             if shared_bucket is not None:
@@ -130,8 +144,12 @@ async def _throttled(src: asyncio.StreamReader, dst: asyncio.StreamWriter,
     except (ConnectionResetError, BrokenPipeError, asyncio.IncompleteReadError):
         pass
     finally:
-        # Ensure queued counter doesn't go stale if we exit mid-stream
-        pass
+        if not reader_task.done():
+            reader_task.cancel()
+        while not q.empty():
+            queued = q.get_nowait()
+            if queued is not None:
+                _queued_bytes -= len(queued)
 
     print(f"  [{tag}] closed  {total/1024:.0f}KB", flush=True)
     try:

@@ -1,0 +1,10 @@
+[Unit]
+Description=browser-screencast headless Xvfb server
+
+[Service]
+ExecStart=__BIN__ --headless --capture x11 --input x11 --listen 127.0.0.1 --port __PORT__
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

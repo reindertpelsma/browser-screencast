@@ -12,7 +12,7 @@ import zlib
 
 import numpy as np
 
-log = logging.getLogger("macvnc")
+log = logging.getLogger("browser_screencast")
 
 # ---------------------------------------------------------------------------
 # VNC helpers
@@ -293,6 +293,8 @@ class VNCBridge:
     def _restart_screensharingd(self) -> bool:
         """Kill and restart screensharingd using the macOS login password from config.
         Blocks until port 5900 reopens (≤15s) or gives up. Returns True on success."""
+        if sys.platform != "darwin":
+            return False
         pw = getattr(self._cfg, 'macos_pass', '')
         if not pw:
             log.warning("screensharingd restart: no macos_pass configured — skipping")

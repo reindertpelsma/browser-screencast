@@ -5,11 +5,25 @@ import os
 import random
 import time
 
+import numpy as np
 from Xlib import X, display
 
 
 def _rgb(r, g, b):
     return (int(r) << 16) | (int(g) << 8) | int(b)
+
+
+def _put_noise_frame(win, gc, depth, rng, width, height, tile):
+    # X11 PutImage requests are capped at 64k 4-byte units. Tile the frame so
+    # high-entropy content stays fast without exceeding protocol limits.
+    frame = rng.integers(0, 256, size=(height, width, 4), dtype=np.uint8)
+    frame[:, :, 3] = 0
+    for y in range(0, height, tile):
+        y2 = min(y + tile, height)
+        for x in range(0, width, tile):
+            x2 = min(x + tile, width)
+            chunk = np.ascontiguousarray(frame[y:y2, x:x2])
+            win.put_image(gc, x, y, x2 - x, y2 - y, X.ZPixmap, depth, 0, chunk.tobytes())
 
 
 def main():
@@ -47,8 +61,23 @@ def main():
     target = 1.0 / float(os.environ.get("ANIM_FPS", "60"))
     mode = os.environ.get("STRESS_MODE", "balls")
     cell = int(os.environ.get("SAT_CELL", "24"))
+    noise_tile = int(os.environ.get("NOISE_TILE", "128"))
+    noise_seed = int(os.environ.get("NOISE_SEED", "20260505"))
+    noise_rng = np.random.default_rng(noise_seed)
     while True:
         t0 = time.monotonic()
+        if mode == "noise":
+            # Full-frame deterministic noise. This is intentionally hostile to
+            # inter-frame compression and should force the congestion loop to
+            # throttle before TCP/SSH backpressure shows up.
+            _put_noise_frame(win, gc, screen.root_depth, noise_rng, w, h, noise_tile)
+            d.flush()
+            frame += 1
+            elapsed = time.monotonic() - t0
+            if elapsed < target:
+                time.sleep(target - elapsed)
+            continue
+
         if mode == "saturation":
             # Large, deterministic random-color cells. This is deliberately
             # hard for inter-frame compression and is used to make the 2 Mbps

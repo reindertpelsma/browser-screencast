@@ -24,6 +24,7 @@ MIN_FRAMES          = 160  # in 8s — 20fps minimum, end-to-end under heavy str
                            # is non-negotiable, even with the screen visually saturated.
 MIN_AUDIO_PKTS      = 10   # total packets in 5s (includes DTX silence)
 MIN_REAL_AUDIO_PKTS = 30   # non-DTX packets — proves real audio is captured, not just silence
+ALLOW_CPU_EXEMPTIONS = os.environ.get("ALLOW_CPU_EXEMPTIONS", "0") == "1"
 
 PASS = "\033[32mPASS\033[0m"
 FAIL = "\033[31mFAIL\033[0m"
@@ -79,11 +80,11 @@ async def test_video():
             fps = frames / max(elapsed, 0.001)
             if frames >= MIN_FRAMES:
                 print(f"  video: {PASS}  {frames} frames ({keyframes} key) in {elapsed:.1f}s = {fps:.1f} fps")
-            elif _cpu.saturated:
+            elif ALLOW_CPU_EXEMPTIONS and _cpu.saturated:
                 print(f"  video: {PASS} (exempted)  only {frames} frames in {elapsed:.1f}s "
                       f"(need {MIN_FRAMES}) — CPU saturated ({_cpu.summary()}), "
                       "runner is the bottleneck")
-            elif _cpu.runner_capped:
+            elif ALLOW_CPU_EXEMPTIONS and _cpu.runner_capped:
                 print(f"  video: {PASS} (exempted)  only {frames} frames in {elapsed:.1f}s "
                       f"(need {MIN_FRAMES}) — CPU has clear headroom ({_cpu.summary()}); "
                       "capture backend cannot deliver more frames")

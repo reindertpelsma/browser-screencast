@@ -13,6 +13,7 @@ browser-screencast installer
 
 Options:
   --systemd       install and start a systemd --user unit
+  --headless      configure/start with server-managed Xvfb + lightweight WM
   --no-deps       skip Python dependency installation
   --start         start the server in the foreground after setup
   --help          show this help
@@ -20,11 +21,13 @@ USAGE
 }
 
 WITH_SYSTEMD=0
+HEADLESS=0
 SKIP_DEPS=0
 START_NOW=0
 for arg in "$@"; do
   case "$arg" in
     --systemd) WITH_SYSTEMD=1 ;;
+    --headless) HEADLESS=1 ;;
     --no-deps) SKIP_DEPS=1 ;;
     --start) START_NOW=1 ;;
     --help|-h) usage; exit 0 ;;
@@ -68,7 +71,19 @@ echo "[detected] package-manager=$PKG display=$DPY"
 if [ "$DPY" = "wayland" ]; then
   echo "[warning] Wayland capture is not implemented in this v0.1 scaffold; use an X11 session or VNC pass-through."
 elif [ "$DPY" = "none" ]; then
-  echo "[warning] no DISPLAY/WAYLAND_DISPLAY found. Start Xvfb manually or use --capture vnc."
+  echo "[warning] no DISPLAY/WAYLAND_DISPLAY found. Use --headless, start Xvfb manually, or use --capture vnc."
+elif [ "$DPY" = "headless-available" ]; then
+  echo "[detected] Xvfb is available. Use --headless for server-managed Xvfb."
+fi
+
+if [ "$HEADLESS" = "1" ]; then
+  if ! command -v Xvfb >/dev/null; then
+    echo "--headless requires Xvfb. Install xvfb with your package manager." >&2
+    exit 1
+  fi
+  if ! command -v openbox >/dev/null && ! command -v xfwm4 >/dev/null && ! command -v fluxbox >/dev/null && ! command -v i3 >/dev/null; then
+    echo "[warning] no lightweight window manager found; install openbox/xfwm4/fluxbox/i3 for usable headless desktop."
+  fi
 fi
 
 PYTHON="${PYTHON:-}"
@@ -140,10 +155,14 @@ if [ "$WITH_SYSTEMD" = "1" ]; then
   fi
   UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
   mkdir -p "$UNIT_DIR"
+  TEMPLATE="browser-screencast.service.template"
+  if [ "$HEADLESS" = "1" ]; then
+    TEMPLATE="browser-screencast-headless.service.template"
+  fi
   sed \
     -e "s#__BIN__#$BIN_DIR/browser-screencast#g" \
     -e "s#__PORT__#$PORT#g" \
-    "$INSTALL_DIR/systemd/browser-screencast.service.template" \
+    "$INSTALL_DIR/systemd/$TEMPLATE" \
     > "$UNIT_DIR/browser-screencast.service"
   systemctl --user daemon-reload
   systemctl --user enable --now browser-screencast.service
@@ -153,6 +172,9 @@ echo
 echo "Installed browser-screencast."
 echo "Token:  $TOKEN"
 echo "Run:    $BIN_DIR/browser-screencast --port $PORT"
+if [ "$HEADLESS" = "1" ]; then
+  echo "Mode:   headless Xvfb"
+fi
 echo "SSH:    ssh -L $PORT:localhost:$PORT user@<host>"
 echo "Open:   http://localhost:$PORT/?token=$TOKEN"
 if [ "$WITH_SYSTEMD" = "0" ]; then
@@ -160,5 +182,9 @@ if [ "$WITH_SYSTEMD" = "0" ]; then
 fi
 
 if [ "$START_NOW" = "1" ]; then
-  exec "$BIN_DIR/browser-screencast" --port "$PORT"
+  if [ "$HEADLESS" = "1" ]; then
+    exec "$BIN_DIR/browser-screencast" --headless --capture x11 --input x11 --port "$PORT"
+  else
+    exec "$BIN_DIR/browser-screencast" --port "$PORT"
+  fi
 fi

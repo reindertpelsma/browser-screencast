@@ -341,6 +341,15 @@ async def client_session(ws, cfg, bridge):
                                           "seq": bridge.server_clipboard_seq}))
             except Exception:
                 pass
+        async def _send_clipboard_if_changed():
+            nonlocal known_clip
+            sc = bridge.server_clipboard_seq
+            if sc != known_clip:
+                known_clip = sc
+                try:
+                    await ws.send(json.dumps({"t": "clipboard", "text": bridge.server_clipboard, "seq": sc}))
+                except Exception:
+                    pass
         nonlocal _enc_target_w, _enc_target_h, _reinit_deadline, _need_keyframe, _last_lag_received
         last_encoder_codec = encoder.actual_codec
         _bw_sent = []       # list of (monotonic_time, bytes) for rolling 1s bandwidth measurement
@@ -466,6 +475,7 @@ async def client_session(ws, cfg, bridge):
                 # and `last_send_time` drift from piling up between captures.
                 cur_fb_seq = bridge._fb_seq
                 if cur_fb_seq == _last_encoded_seq and _pipe_task is None:
+                    await _send_clipboard_if_changed()
                     if not _was_static:
                         _was_static = True
                         _static_since = now
@@ -628,12 +638,7 @@ async def client_session(ws, cfg, bridge):
                 except Exception as e:
                     log.debug("send err: %s", e); break
 
-                sc = bridge.server_clipboard_seq
-                if sc != known_clip and bridge.server_clipboard:
-                    known_clip = sc
-                    try:
-                        await ws.send(json.dumps({"t":"clipboard","text":bridge.server_clipboard,"seq":sc}))
-                    except Exception: pass
+                await _send_clipboard_if_changed()
 
         except Exception as e:
             log.debug("sender exit: %s", e)

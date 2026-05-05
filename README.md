@@ -33,13 +33,13 @@ Implemented now:
 - Optional VNC pass-through with the portable RFB client.
 - WebCodecs codec negotiation with HW/SW client capability reporting.
 - Optional FFmpeg-backed Opus audio loopback when a supported source exists.
+- Linux headless mode with server-managed `Xvfb` and a lightweight window manager.
 - Rootless Linux/BSD install with optional `systemd --user` unit.
 - PowerShell install path with optional Scheduled Task.
 
 Still planned:
 
 - Native Wayland capture through PipeWire portals.
-- Linux headless mode that starts `Xvfb` and a lightweight window manager.
 - Native Windows.Graphics.Capture backend.
 - Hardware encoder probe/open validation for VAAPI/QSV/AMF beyond the current
   PyAV candidate cascade.
@@ -62,6 +62,12 @@ server:
 browser-screencast --capture vnc --input vnc --vnc-host 127.0.0.1 --vnc-port 5900 --vnc-pass "$VNC_PASS"
 ```
 
+For a Linux VM with no display, use server-managed headless mode:
+
+```bash
+browser-screencast --headless --capture x11 --input x11
+```
+
 ## Systemd User Unit
 
 ```bash
@@ -74,6 +80,12 @@ after logout across reboots, enable linger yourself:
 
 ```bash
 loginctl enable-linger "$USER"
+```
+
+For a headless user unit:
+
+```bash
+bash setup.sh --systemd --headless
 ```
 
 ## Windows
@@ -102,3 +114,15 @@ ssh -L 6081:localhost:6081 user@host
 
 Use `--password` or the installer-generated token. Do not bind to `0.0.0.0`
 unless you put another access-control layer in front of it.
+
+## Linux Validation
+
+The local Linux matrix is intentionally strict:
+
+```bash
+python tests/linux_matrix.py
+```
+
+It covers Xvfb/openbox video, X11 input, clipboard, PulseAudio loopback,
+headless mode, and the 2 Mbps proxy congestion test. Use `--fast` for a
+shorter local iteration run.

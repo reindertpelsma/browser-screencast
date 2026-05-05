@@ -6,7 +6,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-if ($IsMacOS) {
+$IsMac = $false
+if ($PSVersionTable.PSVersion.Major -ge 6) {
+  $IsMac = $IsMacOS
+}
+if ($IsMac -or [System.Environment]::OSVersion.Platform -eq "MacOSX") {
   Write-Host "macOS detected. Use macscreencast instead:"
   Write-Host "  https://github.com/reindertpelsma/macscreencast"
   exit 0
@@ -21,9 +25,15 @@ New-Item -ItemType Directory -Force -Path $InstallDir, $BinDir, $ConfigDir | Out
 
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 if (Test-Path (Join-Path $Here "server.py")) {
-  Copy-Item -Recurse -Force (Join-Path $Here "*") $InstallDir
+  $Exclude = @(".git", ".venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache")
+  Get-ChildItem -Force $Here | Where-Object { $Exclude -notcontains $_.Name } | ForEach-Object {
+    Copy-Item -Recurse -Force $_.FullName $InstallDir
+  }
 } else {
-  throw "Run install.ps1 from a browser-screencast checkout for now."
+  if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+    throw "Run install.ps1 from a browser-screencast checkout, or install git first."
+  }
+  git clone https://github.com/reindertpelsma/browser-screencast.git $InstallDir
 }
 
 $Python = if ($env:PYTHON) { $env:PYTHON } else { "python" }

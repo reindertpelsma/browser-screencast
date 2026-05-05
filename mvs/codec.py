@@ -77,7 +77,9 @@ _SERVER_ENCODERS = {
         "sw": ["libsvtav1", "libaom-av1"],
     },
     "vp9": {
-        "hw": ["vp9_vaapi", "vp9_qsv"],
+        # VP9 VAAPI/QSV needs a hardware-frame upload path in EncoderPipeline.
+        # Do not advertise it until the encoder cascade can actually open it.
+        "hw": [],
         "sw": ["libvpx-vp9"],
     },
 }

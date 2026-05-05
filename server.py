@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import secrets
+import shutil
 import sys
 
 log = logging.getLogger("browser_screencast")
@@ -50,6 +51,15 @@ def parse_args():
     p.add_argument("--vnc-pass", default=os.environ.get("VNC_PASS", ""))
     p.add_argument("--vnc-only", action="store_true",
                    help="Use VNC for both capture and input")
+    p.add_argument("--headless", action="store_true",
+                   default=os.environ.get("HEADLESS", "0") == "1",
+                   help="Start an Xvfb display and lightweight window manager on Linux")
+    p.add_argument("--headless-display", default=os.environ.get("HEADLESS_DISPLAY", ":99"),
+                   help="Xvfb display for --headless (default :99)")
+    p.add_argument("--headless-size", default=os.environ.get("HEADLESS_SIZE", "1920x1080x24"),
+                   help="Xvfb screen spec for --headless (default 1920x1080x24)")
+    p.add_argument("--headless-wm", default=os.environ.get("HEADLESS_WM", "auto"),
+                   help="Window manager for --headless: auto, none, openbox, xfwm4, fluxbox, i3")
     p.add_argument("--no-audio", action="store_true",
                    help="Disable the /audio websocket")
     p.add_argument("--print-caps", action="store_true",
@@ -119,6 +129,19 @@ def main():
     log.info("PyAV: %s", "yes" if _AV_OK else "NO — pip install av for video codecs")
     log.info("Server codec caps: %s", probe_server_codecs())
 
+    headless = None
+    if (cfg.headless or
+            (sys.platform.startswith("linux") and cfg.capture == "auto"
+             and not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY")
+             and shutil.which("Xvfb"))):
+        from mvs.headless import HeadlessSession
+        headless = HeadlessSession(cfg)
+        headless.start()
+        if cfg.capture == "auto":
+            cfg.capture = "x11"
+        if cfg.input == "auto":
+            cfg.input = "x11"
+
     bridge = _build_bridge(cfg)
     if cfg.password:
         log.info("-" * 60)
@@ -137,6 +160,8 @@ def main():
             bridge.stop()
         except Exception:
             pass
+        if headless is not None:
+            headless.stop()
 
 
 if __name__ == "__main__":

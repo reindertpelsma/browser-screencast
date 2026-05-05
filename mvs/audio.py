@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import platform
 import queue
 import shutil
@@ -41,6 +42,19 @@ def _run(cmd, timeout=2):
         return ""
 
 
+def _has_audio_clients() -> bool:
+    return _audio_clients > 0
+
+
+def _ffmpeg_devices_text(ffmpeg):
+    try:
+        proc = subprocess.run([ffmpeg, "-hide_banner", "-devices"],
+                              capture_output=True, text=True, timeout=4)
+        return (proc.stdout or "") + (proc.stderr or "")
+    except Exception:
+        return ""
+
+
 def _linux_audio_input():
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
@@ -72,11 +86,18 @@ def _windows_audio_input():
     ffmpeg = shutil.which("ffmpeg.exe") or shutil.which("ffmpeg")
     if not ffmpeg:
         return None
-    # FFmpeg's WASAPI indev is available in current Windows builds. It captures
-    # the default render device in loopback mode when supported by the build.
-    return [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error",
-            "-f", "wasapi", "-i", "default",
-            "-ac", "2", "-ar", "48000", "-f", "f32le", "pipe:1"]
+    explicit = os.environ.get("BROWSER_SCREENCAST_AUDIO_DEVICE") or os.environ.get("AUDIO_DEVICE")
+    devices = _ffmpeg_devices_text(ffmpeg)
+    if " wasapi " in devices or "\n D  wasapi" in devices:
+        return [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error",
+                "-f", "wasapi", "-i", explicit or "default",
+                "-ac", "2", "-ar", "48000", "-f", "f32le", "pipe:1"]
+    if explicit and (" dshow " in devices or "\n D  dshow" in devices):
+        return [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error",
+                "-f", "dshow", "-i", f"audio={explicit}",
+                "-ac", "2", "-ar", "48000", "-f", "f32le", "pipe:1"]
+    log.warning("Windows audio capture needs FFmpeg wasapi support or BROWSER_SCREENCAST_AUDIO_DEVICE for dshow")
+    return None
 
 
 def _audio_input_cmd():
@@ -90,6 +111,9 @@ def _audio_input_cmd():
 def _audio_capture_thread():
     frame_bytes = 960 * 2 * 4  # 20 ms, stereo, float32 interleaved
     while True:
+        if not _has_audio_clients():
+            time.sleep(0.25)
+            continue
         cmd = _audio_input_cmd()
         if not cmd:
             log.warning("Audio capture disabled: ffmpeg/audio source not found")
@@ -100,9 +124,8 @@ def _audio_capture_thread():
         try:
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
             while True:
-                if _audio_clients == 0:
-                    time.sleep(0.25)
-                    continue
+                if not _has_audio_clients():
+                    break
                 raw = proc.stdout.read(frame_bytes)
                 if len(raw) != frame_bytes:
                     break
@@ -120,6 +143,13 @@ def _audio_capture_thread():
                     proc.terminate()
                 except Exception:
                     pass
+                try:
+                    proc.wait(timeout=1)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
         time.sleep(2)
 
 
