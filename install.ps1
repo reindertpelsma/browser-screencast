@@ -55,7 +55,12 @@ Set-Content -Path $CmdPath -Value "@echo off`r`n`"$Python`" `"$InstallDir\server
 if ($ScheduledTask) {
   $Action = New-ScheduledTaskAction -Execute $CmdPath -Argument "--listen 127.0.0.1 --port $Port"
   $Trigger = New-ScheduledTaskTrigger -AtLogOn
-  Register-ScheduledTask -TaskName "browser-screencast" -Action $Action -Trigger $Trigger -Description "browser-screencast server" -Force | Out-Null
+  # Windows capture must run in the logged-in desktop session. OpenSSH sessions
+  # can start the task, but cannot capture the interactive desktop directly.
+  $PrincipalUser = "$env:COMPUTERNAME\$env:USERNAME"
+  $Principal = New-ScheduledTaskPrincipal -UserId $PrincipalUser -LogonType Interactive
+  $Task = New-ScheduledTask -Action $Action -Trigger $Trigger -Principal $Principal -Description "browser-screencast server"
+  Register-ScheduledTask -TaskName "browser-screencast" -InputObject $Task -Force | Out-Null
   Start-ScheduledTask -TaskName "browser-screencast"
 }
 

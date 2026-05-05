@@ -36,10 +36,16 @@ loop, encoder wrapper, VNC client, and congestion controller.
 - ARM64 Ubuntu host (`aarch64`, Python 3.14): `python tests/linux_matrix.py --fast`
   passed, including audio, headless mode, X11 input/clipboard, and shortened
   2 Mbps throttle.
+- Windows 10 LTSC VM through `dockurr/windows`: OpenSSH terminal access,
+  Python 3.12 venv install, bytecode compile, `server.py --print-caps`,
+  interactive Scheduled Task capture probe (`mss` 800x600 BGRA frame) and
+  `SendInput` startup passed. With an animated desktop and audio disabled,
+  host-side `tests/ci_smoke.py 6081 wintest` passed at 161 frames in 8 seconds.
 
 ## What is not yet proven
 
 - Real-machine soak tests on Linux and Windows.
+- Windows audio capture on real hardware.
 - Native Wayland capture/input.
 - Native Windows.Graphics.Capture.
 - Hardware encoder behavior across NVENC/QSV/AMF/VAAPI hosts.
@@ -49,6 +55,8 @@ loop, encoder wrapper, VNC client, and congestion controller.
 
 Wayland currently needs an X11 session, headless Xvfb, or VNC pass-through.
 Windows capture uses the portable `mss` fallback rather than
-Windows.Graphics.Capture. Hardware encoder detection is advisory;
+Windows.Graphics.Capture. On Windows, capture must run in the logged-in
+interactive desktop session; direct OpenSSH-launched capture is expected to
+fail with GDI/BitBlt session isolation. Hardware encoder detection is advisory;
 `EncoderPipeline` still validates by opening the encoder and falls back to
 software/JPEG when needed.
