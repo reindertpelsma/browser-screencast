@@ -565,7 +565,7 @@ class Clipboard:
         except Exception:
             pass
         if platform.system() == "Windows":
-            return self._powershell_clip("Get-Clipboard")
+            return self._powershell_clip("Get-Clipboard -Raw").rstrip("\r\n")
         for cmd in (["wl-paste", "-n"], ["xclip", "-selection", "clipboard", "-o"],
                     ["xsel", "-b", "-o"]):
             if shutil.which(cmd[0]):

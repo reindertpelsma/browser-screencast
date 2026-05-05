@@ -15,6 +15,7 @@ import argparse
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -96,6 +97,12 @@ def _require(exe):
         raise MatrixFailure(f"{exe} is required")
 
 
+def _free_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
 def _xvfb_case(display, size, body):
     _require("Xvfb")
     _require("xdpyinfo")
@@ -135,8 +142,10 @@ def _start_server(display, procs, *, port=6081, audio=False, headless=False, ext
 
 
 def static_checks(_args):
-    _run([PY, "tests/test_codec_probe.py"])
-    _run([PY, "tests/test_platform_keys.py"])
+    unit_tests = [p for p in sorted(Path("tests").glob("test_*.py"))
+                  if p.name != "test_2mbps.py"]
+    for test in unit_tests:
+        _run([PY, str(test)])
     _run([PY, "-m", "py_compile", "server.py", *map(str, sorted(Path("mvs").glob("*.py"))),
           *map(str, sorted(Path("tests").glob("*.py")))])
     _run([PY, "server.py", "--print-caps"])
@@ -144,19 +153,23 @@ def static_checks(_args):
 
 def video_smoke(_args):
     def body(display, procs):
+        port = _free_port()
         procs.append(_spawn([PY, "tests/x11_animate.py"], "/tmp/bs-matrix-anim.log",
                             env={"DISPLAY": display, "STRESS_MODE": "balls", "ANIM_FPS": "60"}))
         time.sleep(1)
-        _start_server(display, procs)
-        _run([PY, "tests/ci_smoke.py", "6081", TOKEN], timeout=20)
+        _start_server(display, procs, port=port)
+        _run([PY, "tests/ci_smoke.py", str(port), TOKEN], timeout=20)
     _xvfb_case(":91", "640x360x24", body)
 
 
 def input_clipboard(_args):
     def body(display, procs):
-        _start_server(display, procs)
-        _run([PY, "tests/x11_input_e2e.py", "6081", TOKEN], env={"DISPLAY": display}, timeout=15)
-        _run([PY, "tests/x11_clipboard_e2e.py", "6081", TOKEN], env={"DISPLAY": display}, timeout=20)
+        port = _free_port()
+        _start_server(display, procs, port=port)
+        _run([PY, "tests/x11_input_e2e.py", str(port), TOKEN],
+             env={"DISPLAY": display}, timeout=15)
+        _run([PY, "tests/x11_clipboard_e2e.py", str(port), TOKEN],
+             env={"DISPLAY": display}, timeout=20)
     _xvfb_case(":92", "640x360x24", body)
 
 
@@ -184,12 +197,13 @@ def _start_pulse(procs):
 
 def audio_smoke(_args):
     def body(display, procs):
+        port = _free_port()
         _start_pulse(procs)
         procs.append(_spawn([PY, "tests/x11_animate.py"], "/tmp/bs-matrix-audio-anim.log",
                             env={"DISPLAY": display, "STRESS_MODE": "balls", "ANIM_FPS": "30"}))
         time.sleep(1)
-        _start_server(display, procs, audio=True)
-        _run([PY, "tests/ci_smoke.py", "6081", TOKEN], timeout=25)
+        _start_server(display, procs, port=port, audio=True)
+        _run([PY, "tests/ci_smoke.py", str(port), TOKEN], timeout=25)
     try:
         _xvfb_case(":93", "640x360x24", body)
     finally:
@@ -199,14 +213,15 @@ def audio_smoke(_args):
 
 def headless_smoke(_args):
     display = ":94"
+    port = _free_port()
     Path(f"/tmp/.X{display[1:]}-lock").unlink(missing_ok=True)
     procs = []
     try:
-        _start_server(display, procs, headless=True)
+        _start_server(display, procs, port=port, headless=True)
         procs.append(_spawn([PY, "tests/x11_animate.py"], "/tmp/bs-matrix-headless-anim.log",
                             env={"DISPLAY": display, "STRESS_MODE": "balls", "ANIM_FPS": "60"}))
         time.sleep(1)
-        _run([PY, "tests/ci_smoke.py", "6081", TOKEN], timeout=20)
+        _run([PY, "tests/ci_smoke.py", str(port), TOKEN], timeout=20)
     finally:
         _stop(procs)
         Path(f"/tmp/.X{display[1:]}-lock").unlink(missing_ok=True)
@@ -218,18 +233,21 @@ def throttle_2mbps(args):
     tail = "10" if args.fast else "15"
 
     def body(display, procs):
+        server_port = _free_port()
+        proxy_port = _free_port()
         procs.append(_spawn([PY, "tests/x11_animate.py"], "/tmp/bs-matrix-noise.log",
                             env={"DISPLAY": display, "STRESS_MODE": "noise",
                                  "NOISE_TILE": "128", "ANIM_FPS": "60"}))
         time.sleep(1)
-        _start_server(display, procs, port=6081,
+        _start_server(display, procs, port=server_port,
                       extra=["--initial-bitrate", "30000000"])
         throttle_log = "/tmp/bs-matrix-throttle.log"
-        procs.append(_spawn([PY, "tests/tcp_throttle.py", "6082", "6081", "2000",
+        procs.append(_spawn([PY, "tests/tcp_throttle.py", str(proxy_port),
+                             str(server_port), "2000",
                              "--mode", "separate", "--max-buf", "256"], throttle_log))
         _wait_log(throttle_log, "tcp_throttle", timeout=5)
         env = {"DURATION": duration, "WARMUP_S": warmup, "TAIL_S": tail, "MIN_PEAK_LAG_MS": "500"}
-        _run([PY, "tests/test_2mbps.py", "6082", TOKEN, "20", "1.4"], env=env,
+        _run([PY, "tests/test_2mbps.py", str(proxy_port), TOKEN, "20", "1.4"], env=env,
              timeout=float(duration) + 20)
         if "BUF OVERRUN" in Path(throttle_log).read_text(errors="replace"):
             raise MatrixFailure("tcp proxy buffer overrun: TCP backpressure reached server")

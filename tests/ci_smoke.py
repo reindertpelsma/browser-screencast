@@ -62,10 +62,10 @@ async def test_video():
                     break
                 if not isinstance(msg, (bytes, bytearray)) or len(msg) < 18:
                     continue
-                # Header: >IQBBI = seq(I) ts(Q) type(B) flags(B) codec(I)
-                _, ts_ms, ftype, _, _ = struct.unpack_from(">IQBBI", msg)
+                # Header: >IQBBI = seq(I) ts(Q) codec(B) flags(B) payload_len(I)
+                _, ts_ms, _codec, flags, _ = struct.unpack_from(">IQBBI", msg)
                 frames += 1
-                if ftype == 1:  # keyframe
+                if flags & 1:
                     keyframes += 1
                 # Send lag reports so the server's feedback-gated ramp-up is exercised.
                 # Also prevents the proactive-backoff path from firing (which requires a

@@ -242,11 +242,8 @@ async def client_session(ws, cfg, bridge):
                         if has_webcodecs and (tw != _enc_target_w or th != _enc_target_h):
                             _reinit_deadline = time.monotonic() + 0.5
                     elif t == "quality":
-                        _old_bw_cap = ctrl.user_bw_cap
                         ctrl.on_quality(int(ev.get("cap_h", 0)), int(ev.get("fps", 0)),
                                         int(ev.get("maxkbps", 0)), int(ev.get("lag_ms", 0)))
-                        if ctrl.user_bw_cap != _old_bw_cap:
-                            _need_keyframe = True
                         nw, nh = bridge.dimensions
                         tw, th = ctrl.effective_target(nw or W, nh or H)
                         if has_webcodecs and (tw != _enc_target_w or th != _enc_target_h):
@@ -363,8 +360,8 @@ async def client_session(ws, cfg, bridge):
         _pipe_enc_seq = -1      # _fb_seq captured when current pipe was started
         _was_static = False     # True when screen has been unchanged this static period
         _static_since = 0.0     # monotonic time when current static period started
-        _refresh_br = 0         # bitrate at which last I-frame quality refresh was sent
-        _refresh_t = 0.0        # monotonic time of last I-frame quality refresh
+        _refresh_br = 0         # bitrate at which last static heartbeat was sent
+        _refresh_t = 0.0        # monotonic time of last static heartbeat
         try:
             while True:
                 now = time.monotonic()
@@ -415,17 +412,21 @@ async def client_session(ws, cfg, bridge):
                     ctrl.on_lag(500.0, 0)
                     _last_lag_received = now  # reset so backoff debounce has time to fire
 
-                # Detect encoder codec switch — drain in-flight encode and force I-frame.
+                # Detect encoder codec switch and force an I-frame for the new decoder.
                 # After encoder rebuild the warmup consumed the I-frame; without an explicit
                 # keyframe the client's fresh VideoDecoder has no reference frame and freezes.
                 current_codec = encoder.actual_codec
                 if current_codec != last_encoder_codec:
-                    last_encoder_codec = current_codec
-                    if _pipe_task is not None:
-                        try: await _pipe_task
-                        except Exception: pass
-                        _pipe_task = None
-                    _need_keyframe = True
+                    if _pipe_task is not None and has_webcodecs:
+                        pass
+                    else:
+                        last_encoder_codec = current_codec
+                        if _pipe_task is not None:
+                            try: await _pipe_task
+                            except Exception: pass
+                            _pipe_task = None
+                            _n_drop += 1
+                        _need_keyframe = True
 
                 # Write buffer check — immediate local backpressure.
                 # Threshold is fps+bitrate-aware (lag_wb_budget) so a single
@@ -438,36 +439,38 @@ async def client_session(ws, cfg, bridge):
                     break
 
                 # Drain pause: downstream buffer (SSH/sshd/bufferbloat path) is backed up.
-                # Stop sending entirely until ctrl clears the drain window so the queue
-                # can empty before we resume. Any in-flight encode is discarded safely
-                # (encode() was already called, so force a keyframe on resume to re-sync
-                # the decoder reference chain).
+                # Stop sending before starting new encodes. If a video encode is already
+                # in flight, it must still be sent: the inter-frame encoder/decoder
+                # reference chain assumes TCP ordering and no post-encode frame loss.
                 if ctrl.draining:
-                    if _pipe_task is not None:
-                        try: await _pipe_task
-                        except Exception: pass
-                        _pipe_task = None
-                        if has_webcodecs:
-                            _need_keyframe = True
-                    # Short-circuit drain once the queue has actually cleared
-                    # — the controller sized the pause for worst-case but the
-                    # link may have drained faster.
-                    ctrl.end_drain_if_clear(_get_wbuf(ws))
-                    if ctrl.draining:
-                        await asyncio.sleep(0.05)
-                        continue
+                    if _pipe_task is not None and has_webcodecs:
+                        pass
+                    else:
+                        if _pipe_task is not None:
+                            try: await _pipe_task
+                            except Exception: pass
+                            _pipe_task = None
+                            _n_drop += 1
+                        # Short-circuit drain once the queue has actually cleared
+                        # — the controller sized the pause for worst-case but the
+                        # link may have drained faster.
+                        ctrl.end_drain_if_clear(_get_wbuf(ws))
+                        if ctrl.draining:
+                            await asyncio.sleep(0.05)
+                            continue
 
                 if wb > ctrl.lag_wb_budget():
                     ctrl.on_lag(0, wb)
-                    _n_drop += 1
-                    if has_webcodecs:
-                        _need_keyframe = True
-                    if _pipe_task is not None:
-                        try: await _pipe_task
-                        except Exception: pass
-                        _pipe_task = None
-                    await asyncio.sleep(0.01)
-                    continue
+                    if _pipe_task is not None and has_webcodecs:
+                        pass
+                    else:
+                        _n_drop += 1
+                        if _pipe_task is not None:
+                            try: await _pipe_task
+                            except Exception: pass
+                            _pipe_task = None
+                        await asyncio.sleep(0.01)
+                        continue
 
                 # Static-screen skip: no new content — poll at 1ms so the next
                 # frame is detected and encoded within 1-2ms of the subprocess writing
@@ -483,10 +486,9 @@ async def client_session(ws, cfg, bridge):
                         _refresh_t = 0.0
                     else:
                         fps_s, br_s, jq_s = ctrl.snapshot()
-                        # Heartbeat: send a frame every 2s when static so the client
-                        # sees cursor movement and confirms the stream is alive (0fps
-                        # on a static screen feels broken even when latency is fine).
-                        # Also send a higher-quality refresh when bitrate improved >25%.
+                        # Heartbeat: send a normal frame every 2s when static so the
+                        # client sees the stream is alive. Do not force periodic
+                        # I-frames; this is an interlocked encoder/decoder stream.
                         last_refresh_age = now - _refresh_t
                         quality = 95 if br_s > _refresh_br * 1.25 else 75
                         if now - _static_since > 1.0 and last_refresh_age > 2.0:
@@ -498,11 +500,11 @@ async def client_session(ws, cfg, bridge):
                                 encoder.set_bitrate(br_s)
                                 try:
                                     payload_s, is_kf_s, codec_s = await loop.run_in_executor(
-                                        None, encoder.encode_keyframe, fb_s, cms_s, quality)
+                                        None, encoder.encode, fb_s, cms_s, quality)
                                     if payload_s:
                                         seq_num += 1
                                         hdr_s = _hdr(seq_num, int(time.time() * 1000),
-                                                     codec_s, True, len(payload_s))
+                                                     codec_s, is_kf_s, len(payload_s))
                                         await ws.send(hdr_s + payload_s)
                                         _n_diag += 1
                                         log.debug("static heartbeat: %dkbps q=%d", br_s // 1000, quality)
@@ -520,15 +522,19 @@ async def client_session(ws, cfg, bridge):
 
                 # Debounced encoder reinit when quality cap or canvas size changed.
                 if _reinit_deadline > 0 and now >= _reinit_deadline:
-                    _reinit_deadline = 0.0
-                    if _pipe_task is not None:
-                        try: await _pipe_task
-                        except Exception: pass
-                        _pipe_task = None
-                    nw2, nh2 = bridge.dimensions
-                    tw2, th2 = ctrl.effective_target(nw2 or W, nh2 or H)
-                    if tw2 != _enc_target_w or th2 != _enc_target_h:
-                        _upgrade_encoder(tw2, th2)
+                    if _pipe_task is not None and has_webcodecs:
+                        pass
+                    else:
+                        _reinit_deadline = 0.0
+                        if _pipe_task is not None:
+                            try: await _pipe_task
+                            except Exception: pass
+                            _pipe_task = None
+                            _n_drop += 1
+                        nw2, nh2 = bridge.dimensions
+                        tw2, th2 = ctrl.effective_target(nw2 or W, nh2 or H)
+                        if tw2 != _enc_target_w or th2 != _enc_target_h:
+                            _upgrade_encoder(tw2, th2)
 
                 # Probe quality up — gated internally on _last_slow (no recent backoff)
                 ctrl.on_fresh()
@@ -556,14 +562,13 @@ async def client_session(ws, cfg, bridge):
                     wb = _get_wbuf(ws)
                     if wb > ctrl.lag_wb_budget():
                         ctrl.on_lag(0, wb)
-                        _n_drop += 1
-                        if has_webcodecs:
-                            _need_keyframe = True
-                        if _pipe_task is not None:
-                            try: await _pipe_task
-                            except Exception: pass
-                            _pipe_task = None
-                        continue
+                        if _pipe_task is None or not has_webcodecs:
+                            _n_drop += 1
+                            if _pipe_task is not None:
+                                try: await _pipe_task
+                                except Exception: pass
+                                _pipe_task = None
+                            continue
 
                 # Collect encode result — encode ran during sleep, so this is near-instant
                 if _pipe_task is None:
@@ -597,12 +602,12 @@ async def client_session(ws, cfg, bridge):
                     last_send_time = target
                     continue
 
-                if _get_wbuf(ws) > ctrl.lag_wb_budget():
-                    ctrl.on_lag(0, _get_wbuf(ws))
-                    _n_drop += 1
-                    if has_webcodecs:
-                        _need_keyframe = True
-                    continue
+                wb = _get_wbuf(ws)
+                if wb > ctrl.lag_wb_budget():
+                    ctrl.on_lag(0, wb)
+                    if not has_webcodecs:
+                        _n_drop += 1
+                        continue
 
                 last_send_time = target
                 _last_encoded_seq = _pipe_enc_seq
@@ -644,8 +649,10 @@ async def client_session(ws, cfg, bridge):
             log.debug("sender exit: %s", e)
         finally:
             if _pipe_task is not None:
-                try: await _pipe_task
-                except Exception: pass
+                try:
+                    await _pipe_task
+                except Exception:
+                    pass
             encoder.close()
 
     dbg_q: asyncio.Queue = asyncio.Queue()

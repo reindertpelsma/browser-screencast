@@ -18,6 +18,10 @@ log = logging.getLogger("browser_screencast")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 
+def _truthy_env(name: str, default: str = "0") -> bool:
+    return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="browser-screencast server")
     p.add_argument("--listen", default=os.environ.get("LISTEN", "127.0.0.1"))
@@ -52,7 +56,7 @@ def parse_args():
     p.add_argument("--vnc-only", action="store_true",
                    help="Use VNC for both capture and input")
     p.add_argument("--headless", action="store_true",
-                   default=os.environ.get("HEADLESS", "0") == "1",
+                   default=_truthy_env("HEADLESS"),
                    help="Start an Xvfb display and lightweight window manager on Linux")
     p.add_argument("--headless-display", default=os.environ.get("HEADLESS_DISPLAY", ":99"),
                    help="Xvfb display for --headless (default :99)")
@@ -129,37 +133,39 @@ def main():
     log.info("PyAV: %s", "yes" if _AV_OK else "NO — pip install av for video codecs")
     log.info("Server codec caps: %s", probe_server_codecs())
 
+    bridge = None
     headless = None
-    if (cfg.headless or
-            (sys.platform.startswith("linux") and cfg.capture == "auto"
-             and not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY")
-             and shutil.which("Xvfb"))):
-        from mvs.headless import HeadlessSession
-        headless = HeadlessSession(cfg)
-        headless.start()
-        if cfg.capture == "auto":
-            cfg.capture = "x11"
-        if cfg.input == "auto":
-            cfg.input = "x11"
-
-    bridge = _build_bridge(cfg)
-    if cfg.password:
-        log.info("-" * 60)
-        log.info("Token:  %s", cfg.password)
-        log.info("URL:    http://localhost:%d/?token=%s", cfg.port, cfg.password)
-        log.info("SSH:    ssh -L %d:localhost:%d user@<host>", cfg.port, cfg.port)
-        log.info("-" * 60)
-    else:
-        log.warning("No access token set. Bind remains %s; use --password or --generate-token.",
-                    cfg.listen)
-
     try:
+        if (cfg.headless or
+                (sys.platform.startswith("linux") and cfg.capture == "auto"
+                 and not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY")
+                 and shutil.which("Xvfb"))):
+            from mvs.headless import HeadlessSession
+            headless = HeadlessSession(cfg)
+            headless.start()
+            if cfg.capture == "auto":
+                cfg.capture = "x11"
+            if cfg.input == "auto":
+                cfg.input = "x11"
+
+        bridge = _build_bridge(cfg)
+        if cfg.password:
+            log.info("-" * 60)
+            log.info("Token:  %s", cfg.password)
+            log.info("URL:    http://localhost:%d/?token=%s", cfg.port, cfg.password)
+            log.info("SSH:    ssh -L %d:localhost:%d user@<host>", cfg.port, cfg.port)
+            log.info("-" * 60)
+        else:
+            log.warning("No access token set. Bind remains %s; use --password or --generate-token.",
+                        cfg.listen)
+
         asyncio.run(_main(cfg, bridge))
     finally:
-        try:
-            bridge.stop()
-        except Exception:
-            pass
+        if bridge is not None:
+            try:
+                bridge.stop()
+            except Exception:
+                pass
         if headless is not None:
             headless.stop()
 
