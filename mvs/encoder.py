@@ -60,7 +60,7 @@ class EncoderPipeline:
                 # tune=zerolatency omitted: it disables cu-tree rate control, causing
                 # uneven post-motion bit distribution and visible softness after pans.
                 ("libx265", {"preset": "fast",
-                             "x265-params": "bframes=0:rc-lookahead=0:aq-mode=1:min-keyint=1:scenecut=0:no-sao=1:no-strong-intra-smoothing=1"}),
+                             "x265-params": "bframes=0:rc-lookahead=0:aq-mode=1:min-keyint=1:scenecut=0:no-sao=1:no-strong-intra-smoothing=1:level-idc=4.1:weightp=0"}),
             ],
             CODEC_AV1: [
                 ("av1_nvenc", {"preset": "p4", "tune": "ull", "rc": "vbr"}),
@@ -83,6 +83,9 @@ class EncoderPipeline:
                 cc.pix_fmt = "yuv420p"
                 cc.bit_rate = bitrate
                 cc.time_base = fractions.Fraction(1, 1000)
+                # Declare 60fps so encoders (SVT-AV1, x265) don't derive 1000fps
+                # from time_base=1/1000, which causes level/profile violations.
+                cc.framerate = fractions.Fraction(60, 1)
                 # Large GOP: one I-frame per 5 seconds at max fps. Static screens
                 # produce near-zero P-frames; a short GOP would flood with large I-frames.
                 cc.gop_size = 99999
