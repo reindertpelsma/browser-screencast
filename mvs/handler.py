@@ -485,7 +485,11 @@ async def client_session(ws, cfg, bridge):
                 # it.  Shorter poll than the capture interval keeps encode latency low
                 # and `last_send_time` drift from piling up between captures.
                 cur_fb_seq = bridge._fb_seq
-                if cur_fb_seq == _last_encoded_seq and _pipe_task is None:
+                # _need_keyframe must bypass the static path: the static heartbeat
+                # calls encoder.encode() (P-frame), which the browser cannot decode
+                # before the IDR has been sent. Skip the static branch so the normal
+                # encode path below handles the forced keyframe first.
+                if cur_fb_seq == _last_encoded_seq and _pipe_task is None and not _need_keyframe:
                     await _send_clipboard_if_changed()
                     if not _was_static:
                         _was_static = True
