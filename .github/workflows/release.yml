@@ -22,6 +22,9 @@ jobs:
           - os: windows
             arch: amd64
             runner: windows-2022
+          - os: windows
+            arch: arm64
+            runner: windows-11-arm
 
     steps:
       - uses: actions/checkout@v4
@@ -81,7 +84,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: browser-screencast-windows-${{ matrix.arch }}
-          path: dist/browser-screencast.exe
+          path: dist\browser-screencast.exe
 
   release:
     name: Publish release
@@ -104,6 +107,7 @@ jobs:
           cp dist/browser-screencast-linux-amd64/browser-screencast  release/browser-screencast-linux-amd64
           cp dist/browser-screencast-linux-arm64/browser-screencast  release/browser-screencast-linux-arm64
           cp dist/browser-screencast-windows-amd64/browser-screencast.exe release/browser-screencast-windows-amd64.exe
+          cp dist/browser-screencast-windows-arm64/browser-screencast.exe release/browser-screencast-windows-arm64.exe
           ls -lh release/
 
       - name: Create GitHub release

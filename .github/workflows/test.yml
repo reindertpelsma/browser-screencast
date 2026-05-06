@@ -15,8 +15,10 @@ jobs:
         include:
           - os: linux
             runner: ubuntu-22.04
-          - os: windows
+          - os: windows-amd64
             runner: windows-2022
+          - os: windows-arm64
+            runner: windows-11-arm
 
     steps:
       - uses: actions/checkout@v4
@@ -56,7 +58,7 @@ jobs:
                  -v
 
       - name: Run tests (Windows)
-        if: matrix.os == 'windows'
+        if: startsWith(matrix.os, 'windows')
         run: |
           pytest tests/test_congestion_policy.py `
                  tests/test_handler_policy.py `

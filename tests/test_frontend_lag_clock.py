@@ -34,6 +34,7 @@ class FrontendLagClockTests(unittest.TestCase):
         script = textwrap.dedent(
             f"""
             let _lagClockOffsetMs = null;
+            let metricRtt = 0;
             {self._lag_clock_js()}
             function assertEq(actual, expected, label) {{
               if (actual !== expected) {{

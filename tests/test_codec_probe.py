@@ -10,11 +10,21 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from mvs import codec
 
 
+class _FakeOpenableContext:
+    """Minimal stand-in for av.CodecContext that survives attribute sets + open()."""
+
+    def open(self):
+        pass
+
+    def __setattr__(self, key, value):
+        pass  # accept width/height/pix_fmt/etc without error
+
+
 class _FakeCodecContext:
     @staticmethod
     def create(name, mode):
         if mode == "w" and name in {"libx264", "h264"}:
-            return object()
+            return _FakeOpenableContext()
         raise RuntimeError(name)
 
 
