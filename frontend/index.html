@@ -306,7 +306,7 @@ async function probeSupportedCodecs(){
     _codecCaps[p.name]={hw:false,sw:false};
     for(const [kind,hw] of [['hw','prefer-hardware'],['sw','prefer-software']]){
       for(const lat of[true,false]){
-        for(const cs of [p.codec,...(p.alt?[p.alt]:[]))){
+        for(const cs of [p.codec,...(p.alt?[p.alt]:[])]){
           const cfg={codec:cs,hardwareAcceleration:hw,optimizeForLatency:lat};
           try{
             const r=await VideoDecoder.isConfigSupported(cfg);
