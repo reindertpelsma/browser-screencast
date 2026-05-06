@@ -354,10 +354,11 @@ async def client_session(ws, cfg, bridge):
         _last_capture_fbu = bridge._fbu_count
         # Pipelined encode: start encoding during the rate-limit sleep so that
         # encode time doesn't add to the frame interval.
-        _pipe_task = None       # concurrent encode future
-        _pipe_cap_ms = 0        # cap_ms captured when pipe_task was started
-        _last_encoded_seq = -1  # _fb_seq of last successfully sent frame
-        _pipe_enc_seq = -1      # _fb_seq captured when current pipe was started
+        _pipe_task = None           # concurrent encode future
+        _pipe_cap_ms = 0            # cap_ms captured when pipe_task was started
+        _pipe_is_keyframe = False   # True when _pipe_task is a keyframe encode attempt
+        _last_encoded_seq = -1      # _fb_seq of last successfully sent frame
+        _pipe_enc_seq = -1          # _fb_seq captured when current pipe was started
         _was_static = False     # True when screen has been unchanged this static period
         _static_since = 0.0     # monotonic time when current static period started
         _refresh_br = 0         # bitrate at which last static heartbeat was sent
@@ -549,8 +550,10 @@ async def client_session(ws, cfg, bridge):
                         _pipe_enc_seq = cur_fb_seq
                         if _need_keyframe:
                             _need_keyframe = False
+                            _pipe_is_keyframe = True
                             _pipe_task = loop.run_in_executor(None, encoder.encode_keyframe, fb, cap_ms, 85)
                         else:
+                            _pipe_is_keyframe = False
                             _pipe_task = loop.run_in_executor(None, encoder.encode, fb, cap_ms, jq)
 
                 # Rate limit using deadline: last_send_time advances by interval each frame
@@ -578,6 +581,7 @@ async def client_session(ws, cfg, bridge):
                         await asyncio.sleep(0.01)
                         continue
                     encoder.set_bitrate(bitrate)
+                    _was_kf_req = _need_keyframe
                     try:
                         if _need_keyframe:
                             _need_keyframe = False
@@ -588,14 +592,22 @@ async def client_session(ws, cfg, bridge):
                                 None, encoder.encode, fb, cap_ms, jq)
                     except Exception as e:
                         log.debug("encode err: %s", e); continue
+                    # Hardware encoder pipeline not ready — keyframe will be retried next iter.
+                    if payload is None and _was_kf_req:
+                        _need_keyframe = True
                 else:
                     cap_ms = _pipe_cap_ms
+                    _kf_was_piped = _pipe_is_keyframe
+                    _pipe_is_keyframe = False
                     try:
                         payload, is_kf, codec_byte = await _pipe_task
                     except Exception as e:
                         log.debug("encode err: %s", e)
                         _pipe_task = None; continue
                     _pipe_task = None
+                    # Hardware encoder pipeline not ready — re-schedule keyframe for next iter.
+                    if payload is None and _kf_was_piped:
+                        _need_keyframe = True
 
                 if payload is None:
                     _n_nosend += 1

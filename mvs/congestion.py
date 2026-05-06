@@ -2,7 +2,7 @@ import logging
 import threading
 import time
 
-log = logging.getLogger("macvnc")
+log = logging.getLogger("browser_screencast")
 
 
 # ---------------------------------------------------------------------------
