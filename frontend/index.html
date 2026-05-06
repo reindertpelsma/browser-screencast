@@ -297,7 +297,7 @@ async function probeSupportedCodecs(){
   if(typeof VideoDecoder==='undefined')return[];
   const probes=[
     {name:'av1', codec:'av01.0.08M.08'},
-    {name:'h265',codec:'hev1.1.6.L123.B0'},
+    {name:'h265',codec:'hev1.1.6.L123.B0',alt:'hvc1.1.6.L123.B0'},
     {name:'vp9', codec:'vp09.00.10.08'},
     {name:'h264',codec:'avc1.64002a'},
   ];
@@ -306,15 +306,18 @@ async function probeSupportedCodecs(){
     _codecCaps[p.name]={hw:false,sw:false};
     for(const [kind,hw] of [['hw','prefer-hardware'],['sw','prefer-software']]){
       for(const lat of[true,false]){
-        const cfg={codec:p.codec,hardwareAcceleration:hw,optimizeForLatency:lat};
-        try{
-          const r=await VideoDecoder.isConfigSupported(cfg);
-          if(r.supported){
-            _codecCaps[p.name][kind]=true;
-            if(!_codecConfig[p.name])_codecConfig[p.name]=cfg;
-            break;
-          }
-        }catch(e){}
+        for(const cs of [p.codec,...(p.alt?[p.alt]:[]))){
+          const cfg={codec:cs,hardwareAcceleration:hw,optimizeForLatency:lat};
+          try{
+            const r=await VideoDecoder.isConfigSupported(cfg);
+            if(r.supported){
+              _codecCaps[p.name][kind]=true;
+              if(!_codecConfig[p.name])_codecConfig[p.name]=cfg;
+              break;
+            }
+          }catch(e){}
+        }
+        if(_codecCaps[p.name][kind])break;
       }
     }
     if(_codecCaps[p.name].hw||_codecCaps[p.name].sw)out.push(p.name);
@@ -361,13 +364,18 @@ const CODEC_NAMES={0:'jpeg',1:'h264',2:'h265',3:'av1',4:'vp9'};
 
 // LAG_CLOCK_BEGIN
 function _linkAgeFromServerTimestamp(nowMs, capMs){
-  // Server and browser often run on different machines over SSH. Raw
-  // Date.now()-serverSendMs includes wall-clock skew, so calibrate to the
-  // lowest observed raw age and report only queue growth above that baseline.
+  // Server and browser clocks are never synchronized. Raw Date.now()-serverSendMs
+  // includes clock skew, so we calibrate by tracking the minimum raw age seen
+  // (= skew + best-case one-way latency). We then add back the metric-channel
+  // one-way estimate (metricRtt/2) so the displayed lag is absolute and always
+  // >= net (which also shows the one-way estimate), making the two comparable:
+  //   lag = relative_queue_growth + one_way_estimate  >= one_way_estimate = net
   const rawAge=nowMs-capMs;
   if(!Number.isFinite(rawAge))return 1;
   if(_lagClockOffsetMs===null||rawAge<_lagClockOffsetMs)_lagClockOffsetMs=rawAge;
-  return Math.max(1,Math.round(rawAge-_lagClockOffsetMs));
+  const relLag=Math.max(0,rawAge-_lagClockOffsetMs);
+  const oneWay=metricRtt>0?Math.round(metricRtt/2):0;
+  return Math.max(1,Math.round(relLag+oneWay));
 }
 // LAG_CLOCK_END
 
@@ -474,7 +482,9 @@ function updateFps(){
     const bw=rxBps>=1e6?(rxBps/1e6).toFixed(1)+'Mbps':(rxBps/1e3).toFixed(0)+'Kbps';
     const lag=worstAge5s>0?'lag:'+worstAge5s+'ms ':'';
     const codec=codecName?codecName+' ':'';
-    const net=worstMetricRtt5s>0?'net:'+worstMetricRtt5s+'ms ':'';
+    // net shows one-way estimate (RTT/2) so it's on the same scale as lag.
+    // Invariant: lag >= net (lag grows above net when the video queue builds up).
+    const net=worstMetricRtt5s>0?'net:'+Math.round(worstMetricRtt5s/2)+'ms ':'';
     const stl=staleMs>2000?'stale:'+(staleMs/1000).toFixed(0)+'s ':'';
     hud.textContent=fc+'fps '+codec+bw+' '+lag+net+stl+imgW+'×'+imgH;
     fc=0;lastFpsT=now;

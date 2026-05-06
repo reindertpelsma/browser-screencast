@@ -253,7 +253,7 @@ class AdaptiveController:
             else:
                 self._metric_rtt = self._metric_rtt * 0.7 + rtt_ms * 0.3
 
-    def on_fresh(self):
+    def on_fresh(self, frame_bytes: int = 0):
         with self._lock:
             now = time.monotonic()
             # Minimum tick: 100ms — lag reports are throttled to 10/s; no point checking faster.
@@ -298,16 +298,29 @@ class AdaptiveController:
                 # (~16s) to reach 5.4Mbps, giving time for lag reports to fire if we overshoot
                 # before the queue builds to the drain-threshold again.
                 # Below the known ceiling (where we've congested before): +20%/tick.
-                # Above the ceiling (probing new territory): +10%/tick below 20Mbps, +5% above.
+                # Above the ceiling (probing new territory): +10%/tick below 20Mbps, +5% above,
+                # BUT ONLY when the frame carried real data (>1 MTU).
+                #
+                # Without the frame_bytes gate, near-zero static P-frames (100-400 bytes from
+                # an idle VNC desktop) produce lag reports showing 0 congestion, causing the
+                # controller to probe from 300k to 16Mbps in ~5s with no actual link testing.
+                # The first real frame (mouse move / window open) then hits at 16Mbps, congests,
+                # and the cycle repeats. Gating above-ceiling probes on frame_bytes>1500 ensures
+                # we only claim "the link handled more" when we actually sent data through it.
+                # Below-ceiling recovery (+20%) is ungated — converging back to the known stable
+                # point is safe even on near-zero frames.
                 target = int(self._ceil_bitrate * 0.90) if self._ceil_bitrate > 0 else self._max_br
                 target = min(target, self._max_br)
                 if self.bitrate < target:
                     step = max(int(self.bitrate * 1.20), self.bitrate + 200_000)
                     self.bitrate = min(target, step)
-                elif self.bitrate < 20_000_000:
-                    self.bitrate = min(self._max_br, int(self.bitrate * 1.10))
+                elif frame_bytes > 1500:
+                    if self.bitrate < 20_000_000:
+                        self.bitrate = min(self._max_br, int(self.bitrate * 1.10))
+                    else:
+                        self.bitrate = min(self._max_br, int(self.bitrate * 1.05))
                 else:
-                    self.bitrate = min(self._max_br, int(self.bitrate * 1.05))
+                    return  # near-zero frame: don't probe above last congestion ceiling
                 self.jpeg_quality = min(95, self.jpeg_quality + 5)
                 _changed = True
             if _changed:

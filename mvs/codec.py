@@ -189,10 +189,14 @@ def normalize_client_caps(client_caps):
 
 
 def select_codec(server_caps, client_caps, explicit=False):
+    # Codec quality is the outer priority: h265 must always beat vp9/h264 regardless
+    # of whether encode/decode is hw or sw. Within a codec, prefer hw over sw on
+    # both sides. The previous order (hw/sw outer, codec inner) caused VP9 with a
+    # hw client decoder to beat H265 with only a sw client decoder — wrong tradeoff.
     codec_priority = ["av1", "h265", "vp9", "h264"]
     group_priority = [("hw", "hw"), ("hw", "sw"), ("sw", "hw"), ("sw", "sw")]
-    for s_kind, c_kind in group_priority:
-        for codec in codec_priority:
+    for codec in codec_priority:
+        for s_kind, c_kind in group_priority:
             # Auto-mode AV1 only when the SERVER has hardware AV1 (av1_nvenc/qsv/amf).
             # libsvtav1's realtime preset-10 output is silently rejected by Chrome's
             # WebCodecs AV1 decoder more often than it is accepted — the browser then

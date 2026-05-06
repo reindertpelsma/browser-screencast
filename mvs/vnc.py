@@ -14,6 +14,12 @@ import numpy as np
 
 log = logging.getLogger("browser_screencast")
 
+# VNC servers only push framebuffer updates when pixels change, so the handler's
+# static-seq skip would throttle to 0.5fps on idle desktops. Setting this False
+# signals handler.py to keep encoding at full fps regardless of seq changes —
+# P-frames on static content cost ~0 bytes and keep lag reports flowing.
+_VNC_CONTINUOUS_PUSH = False
+
 # ---------------------------------------------------------------------------
 # VNC helpers
 # ---------------------------------------------------------------------------
@@ -136,7 +142,7 @@ def _decode_zrle(fb, zd, x, y, w, h, zdata, rs, gs, bs):
                     if ib&0x80:
                         run=1
                         while tiles[pos]==255: run+=255; pos+=1
-                        run+=tiles[pos]+1; pos+=1
+                        run+=tiles[pos]; pos+=1
                     else: run=1
                     r,g,b=pal[idx,ri],pal[idx,gi],pal[idx,bi]
                     for _ in range(run):
@@ -156,12 +162,14 @@ import mvs.handler as _handler_mod
 
 
 class VNCBridge:
+    continuous_push = False   # VNC only sends updates on pixel changes; handler must not static-skip
+
     def __init__(self, cfg):
         self._cfg = cfg
         self._lock = threading.Lock()
         self._sock = None
         self._fb = None        # numpy RGB framebuffer
-        self._fb_seq = 0       # incremented on every update
+        self._fb_seq = 0       # incremented on every VNC update
         self._fb_ms = 0        # Unix ms of last captured frame
         self._W = self._H = 0
         self._rs = self._gs = self._bs = 0
@@ -596,6 +604,13 @@ class VNCBridge:
                                     _last_change_ms = now_ms
                                     self._nudge_schedule = []
                                 else:
+                                    # Hash unchanged — content looks static, but cursor
+                                    # movement (or other sub-sample-grid changes) won't
+                                    # be detected by the coarse hash. Always bump _fb_seq
+                                    # so get_current_frame() delivers fresh pixels from
+                                    # the VNC server on every FBU cycle. _fb_ms only
+                                    # updates on real content changes (for fb_age metric).
+                                    self._fb_seq += 1
                                     # screensharingd returned stale pixels. If a key was
                                     # recently pressed but no content arrived for 150ms,
                                     # screensharingd is HID-idle — bypass with CGDisplayCreateImage.

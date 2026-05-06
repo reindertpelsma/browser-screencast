@@ -41,10 +41,10 @@ def parse_args():
     p.add_argument("--generate-token", action="store_true",
                    help="Generate and print a token if --password is not set")
 
-    p.add_argument("--capture", choices=["auto", "x11", "wayland", "windows", "mss", "vnc", "none"],
+    p.add_argument("--capture", choices=["auto", "x11", "x11grab", "wayland", "windows", "mss", "vnc", "none"],
                    default=os.environ.get("CAPTURE_MODE", "auto"),
                    help="Capture backend (default auto)")
-    p.add_argument("--input", choices=["auto", "x11", "windows", "vnc", "none"],
+    p.add_argument("--input", choices=["auto", "x11", "x11grab", "windows", "vnc", "none"],
                    default=os.environ.get("INPUT_MODE", "auto"),
                    help="Input backend (default auto)")
     p.add_argument("--monitor", type=int, default=int(os.environ.get("MONITOR", "1")),
@@ -55,6 +55,8 @@ def parse_args():
     p.add_argument("--vnc-pass", default=os.environ.get("VNC_PASS", ""))
     p.add_argument("--vnc-only", action="store_true",
                    help="Use VNC for both capture and input")
+    p.add_argument("--display", default=os.environ.get("DISPLAY", ":1.0"),
+                   help="X display for x11grab capture (default :1.0)")
     p.add_argument("--headless", action="store_true",
                    default=_truthy_env("HEADLESS"),
                    help="Start an Xvfb display and lightweight window manager on Linux")
@@ -69,6 +71,9 @@ def parse_args():
     p.add_argument("--print-caps", action="store_true",
                    help="Print detected server codec capabilities and exit")
     args = p.parse_args()
+
+    # x11grab display
+    args.x11_display = args.display
 
     # Compatibility attributes consumed by the portable RFB client.
     args.macos_user = ""
@@ -106,6 +111,16 @@ def _build_bridge(cfg):
         if not cfg.vnc_pass:
             log.warning("VNC selected without --vnc-pass; only unauthenticated VNC servers will work")
         bridge = VNCBridge(cfg)
+        bridge.start()
+        return bridge
+
+    if cfg.capture == "x11grab":
+        from mvs.x11grab import X11GrabBridge
+        # Allow --display override; fall back to DISPLAY env var or :1
+        import os
+        if not hasattr(cfg, 'x11_display') or not cfg.x11_display:
+            cfg.x11_display = os.environ.get('DISPLAY', ':1.0')
+        bridge = X11GrabBridge(cfg)
         bridge.start()
         return bridge
 

@@ -500,7 +500,15 @@ async def client_session(ws, cfg, bridge):
                 # calls encoder.encode() (P-frame), which the browser cannot decode
                 # before the IDR has been sent. Skip the static branch so the normal
                 # encode path below handles the forced keyframe first.
-                if cur_fb_seq == _last_encoded_seq and _pipe_task is None and not _need_keyframe:
+                #
+                # continuous_push=False (e.g. VNCBridge): the capture source only
+                # delivers new _fb_seq when pixels actually change, so the seq-equality
+                # check would throttle to 0.5fps heartbeats on an idle desktop.
+                # Bypass the static path entirely and always encode; P-frames on a
+                # static screen cost ~0 bytes and keep lag reports flowing normally.
+                _bridge_pushes = getattr(bridge, 'continuous_push', True)
+                if cur_fb_seq == _last_encoded_seq and _pipe_task is None and not _need_keyframe \
+                        and _bridge_pushes:
                     await _send_clipboard_if_changed()
                     if not _was_static:
                         _was_static = True
@@ -558,9 +566,6 @@ async def client_session(ws, cfg, bridge):
                         tw2, th2 = ctrl.effective_target(nw2 or W, nh2 or H)
                         if tw2 != _enc_target_w or th2 != _enc_target_h:
                             _upgrade_encoder(tw2, th2)
-
-                # Probe quality up — gated internally on _last_slow (no recent backoff)
-                ctrl.on_fresh()
 
                 # Pipeline: start encode NOW so it runs concurrently with the rate-limit sleep.
                 # Encode takes ~4.5ms; sleep is ~16.7ms — encode finishes well before we wake.
@@ -635,6 +640,18 @@ async def client_session(ws, cfg, bridge):
                     _n_nosend += 1
                     last_send_time = target
                     continue
+
+                # Probe quality up now that we know the actual frame size.
+                # Gating on payload here (not before the pipe) lets on_fresh() see whether
+                # this frame carried real data or was a near-zero static P-frame.
+                # For VNC bridges (continuous_push=False), the VNC server only delivers new
+                # _fb_seq when pixels actually change. If _pipe_enc_seq == _last_encoded_seq,
+                # this is a static-screen P-frame — pass 0 bytes to block above-ceiling probing.
+                # (NVENC VBR outputs multi-KB frames even on idle screens, so frame size alone
+                # is not a reliable "the link carried real data" signal in VBR mode.)
+                _bridge_static = (not getattr(bridge, 'continuous_push', True)
+                                  and _pipe_enc_seq == _last_encoded_seq)
+                ctrl.on_fresh(0 if _bridge_static else len(payload))
 
                 wb = _get_wbuf(ws)
                 if wb > ctrl.lag_wb_budget():
