@@ -288,8 +288,10 @@ class AdaptiveController:
                 return
             self._last_fast = now
             fps_ceil = float(self.fps_cap) if self.fps_cap > 0 else self.max_fps
+            _changed = False
             if self.fps < fps_ceil:
                 self.fps = fps_ceil
+                _changed = True
             elif self.bitrate < self._max_br:
                 # Ramp bitrate in +20% steps per 2s tick rather than jumping to the ceiling
                 # in one hop. At 3Mbps after a 6Mbps congestion event this takes ~8 ticks
@@ -307,7 +309,9 @@ class AdaptiveController:
                 else:
                     self.bitrate = min(self._max_br, int(self.bitrate * 1.05))
                 self.jpeg_quality = min(95, self.jpeg_quality + 5)
-            log.info("fresh: fps=%.1f br=%dk ceil=%dk max=%dk", self.fps, self.bitrate//1000, self._ceil_bitrate//1000, self._max_br//1000)
+                _changed = True
+            if _changed:
+                log.info("fresh: fps=%.1f br=%dk ceil=%dk max=%dk", self.fps, self.bitrate//1000, self._ceil_bitrate//1000, self._max_br//1000)
 
     def on_screen_active(self):
         """Screen content changed after a static period — restore fps and jump toward last
