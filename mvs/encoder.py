@@ -53,8 +53,14 @@ class EncoderPipeline:
                 ("hevc_amf", {"usage": "ultralowlatency", "quality": "speed"}),
                 # min-keyint=1: allows consecutive IDR frames when encode_keyframe()
                 # is retried during x265's 2-frame pipeline startup.
-                ("libx265", {"preset": "fast", "tune": "zerolatency",
-                             "x265-params": "bframes=0:rc-lookahead=0:aq-mode=1:min-keyint=1"}),
+                # no-sao + no-strong-intra-smoothing: SAO and intra smoothing blur
+                # sharp text/UI edges in screen capture; harmful for screen content.
+                # scenecut=0: prevents spontaneous IDR on scene cuts (browser sees
+                # unlabelled IDR as a P-frame, corrupting DPB until next forced IDR).
+                # tune=zerolatency omitted: it disables cu-tree rate control, causing
+                # uneven post-motion bit distribution and visible softness after pans.
+                ("libx265", {"preset": "fast",
+                             "x265-params": "bframes=0:rc-lookahead=0:aq-mode=1:min-keyint=1:scenecut=0:no-sao=1:no-strong-intra-smoothing=1"}),
             ],
             CODEC_AV1: [
                 ("av1_nvenc", {"preset": "p4", "tune": "ull", "rc": "vbr"}),
