@@ -193,7 +193,12 @@ def select_codec(server_caps, client_caps, explicit=False):
     # of whether encode/decode is hw or sw. Within a codec, prefer hw over sw on
     # both sides. The previous order (hw/sw outer, codec inner) caused VP9 with a
     # hw client decoder to beat H265 with only a sw client decoder — wrong tradeoff.
-    codec_priority = ["av1", "h265", "vp9", "h264"]
+    #
+    # H.265 is preferred over AV1 in auto mode: hevc_nvenc produces more conformant
+    # bitstreams for WebCodecs than av1_nvenc (Chrome's AV1 WebCodecs decoder is
+    # pickier about bitstream details at low bitrates). AV1 is still reachable via
+    # explicit user selection.
+    codec_priority = ["h265", "av1", "vp9", "h264"]
     group_priority = [("hw", "hw"), ("hw", "sw"), ("sw", "hw"), ("sw", "sw")]
     for codec in codec_priority:
         for s_kind, c_kind in group_priority:
