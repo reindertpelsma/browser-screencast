@@ -229,7 +229,7 @@ async def client_session(ws, cfg, bridge):
                             if client_matrix:
                                 client_caps = normalize_client_caps(client_matrix)
                                 target_codec, server_kind, client_kind = select_codec(
-                                    probe_server_codecs(), client_caps)
+                                    probe_server_codecs(), client_caps, explicit=explicit)
                                 log.info("codec negotiation: %s server=%s client=%s",
                                          {CODEC_H264:"h264",CODEC_H265:"h265",
                                           CODEC_AV1:"av1",CODEC_VP9:"vp9",
@@ -439,6 +439,9 @@ async def client_session(ws, cfg, bridge):
                 # Write buffer check — immediate local backpressure.
                 # Threshold is fps+bitrate-aware (lag_wb_budget) so a single
                 # large frame draining doesn't trigger false congestion at low fps.
+                # yield to event loop so asyncio's transport write buffer drains
+                # before we measure it — prevents false on_lag() at 300kbps floor.
+                await asyncio.sleep(0)
                 wb = _get_wbuf(ws)
                 if wb > 4 * 1024 * 1024:
                     log.warning("write buf %.1fMB — hard kill %s", wb / 1048576, ws.remote_address)

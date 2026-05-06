@@ -170,7 +170,7 @@ def normalize_client_caps(client_caps):
     return out
 
 
-def select_codec(server_caps, client_caps):
+def select_codec(server_caps, client_caps, explicit=False):
     codec_priority = ["av1", "h265", "vp9", "h264"]
     group_priority = [("hw", "hw"), ("hw", "sw"), ("sw", "hw"), ("sw", "sw")]
     for s_kind, c_kind in group_priority:
@@ -180,8 +180,8 @@ def select_codec(server_caps, client_caps):
             # WebCodecs AV1 decoder more often than it is accepted — the browser then
             # signals webcodecs:false and the session falls to JPEG, even though h265
             # would have worked. Hardware AV1 encoders produce far more conformant
-            # bitstreams. Users can still pick software AV1 manually.
-            if codec == "av1" and s_kind == "sw":
+            # bitstreams. Users can still pick software AV1 manually via explicit selection.
+            if not explicit and codec == "av1" and s_kind == "sw":
                 continue
             if (server_caps.get(codec, {}).get(s_kind)
                     and client_caps.get(codec, {}).get(c_kind)):
