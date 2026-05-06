@@ -237,7 +237,13 @@ async def client_session(ws, cfg, bridge):
                                          server_kind, client_kind)
                             elif client_codecs:
                                 target_codec = _select_codec(client_codecs)
+                        old_codec = encoder.actual_codec
                         _upgrade_encoder(explicit=explicit)
+                        if encoder.actual_codec != old_codec:
+                            # Codec changed — browser's VideoDecoder cold-starts.
+                            # Reset proactive-backoff gate so the 500ms silence
+                            # during decoder initialization doesn't trigger backoff.
+                            _last_lag_received = 0.0
                         if _codec_error_msg:
                             _msg = _codec_error_msg; _codec_error_msg = None
                             await ws.send(json.dumps({"t": "codec_error", "msg": _msg}))
@@ -417,6 +423,8 @@ async def client_session(ws, cfg, bridge):
                 # Triggers only when we're actually sending (n_diag > 3 = at least 3 frames
                 # sent this DIAG cycle) and not already in a drain pause.
                 if not ctrl.draining and _n_diag > 3 and _last_lag_received > 0 and now - _last_lag_received > 0.5:
+                    log.info("proactive backoff: no lag report for %.2fs (diag=%d br=%dk)",
+                             now - _last_lag_received, _n_diag, ctrl.bitrate // 1000)
                     ctrl.on_lag(500.0, 0)
                     _last_lag_received = now  # reset so backoff debounce has time to fire
 

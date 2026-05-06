@@ -123,8 +123,8 @@ class AdaptiveController:
             self.jpeg_quality = max(10, int(self.jpeg_quality * factor))
         elif self.fps > min_fps:
             self.fps = max(min_fps, self.fps * factor)
-        log.debug("backoff: fps=%.1f br=%dk ceil=%dk severe=%s min_fps=%.1f",
-                  self.fps, self.bitrate // 1000, self._ceil_bitrate // 1000, severe, min_fps)
+        log.info("backoff: fps=%.1f br=%dk ceil=%dk severe=%s min_fps=%.1f",
+                 self.fps, self.bitrate // 1000, self._ceil_bitrate // 1000, severe, min_fps)
 
     def lag_budget_ms(self):
         """Allowed in-flight delay before congestion backoff fires.
@@ -150,6 +150,8 @@ class AdaptiveController:
         if age_ms == 0 and write_buf < self.lag_wb_budget():
             return
         severe = age_ms > budget * 3 or write_buf > self.lag_wb_budget() * 6
+        log.info("on_lag: age=%.0fms wb=%dB budget=%.0fms wb_budget=%dB severe=%s br=%dk",
+                 age_ms, write_buf, budget, self.lag_wb_budget(), severe, self.bitrate // 1000)
         with self._lock:
             self._backoff(severe)
             # Transmit pause: when severe lag is reported (either via browser
@@ -211,7 +213,7 @@ class AdaptiveController:
                 if gradient > 15:       # rising >15ms per 2s sample = queue building
                     self._backoff(gradient > 40)
                     gradient_fired = True
-                    log.debug("ping gradient=%.1fms rtt=%.1fms", gradient, s)
+                    log.info("ping gradient=%.1fms rtt=%.1fms br=%dk", gradient, s, self.bitrate // 1000)
 
             # Signal 2: delta — buffer STATIC (only when gradient hasn't already fired)
             # Threshold scales with lag budget: at 50ms budget fire at 50ms delta;
@@ -221,8 +223,8 @@ class AdaptiveController:
                 budget = self.lag_budget_ms()
                 if delta > budget:
                     self._backoff(delta > budget * 2)
-                    log.debug("ping delta=%.1fms rtt=%.1fms metric=%.1fms budget=%.0fms",
-                              delta, s, self._metric_rtt, budget)
+                    log.info("ping delta=%.1fms rtt=%.1fms metric=%.1fms budget=%.0fms br=%dk",
+                             delta, s, self._metric_rtt, budget, self.bitrate // 1000)
 
     def on_client_clear(self):
         """Client lag report confirmed path is clear — allow next ramp step promptly.
@@ -253,6 +255,8 @@ class AdaptiveController:
             # we'd ramp 0.65s after a 1.35s drain, immediately re-filling the cleared buffer.
             settle_until = max(self._last_slow + 2.0, self._drain_until + 2.0)
             if now < settle_until:
+                log.debug("fresh blocked: settle in %.1fs (slow=%.1f drain=%.1f)",
+                          settle_until - now, self._last_slow, self._drain_until)
                 return
             # Step interval: short when client actively confirms "clear" via lag reports,
             # long when flying blind (no metric_rtt or no recent clear signal).
@@ -294,7 +298,7 @@ class AdaptiveController:
                 else:
                     self.bitrate = min(self._max_br, int(self.bitrate * 1.05))
                 self.jpeg_quality = min(95, self.jpeg_quality + 5)
-            log.debug("fresh: fps=%.1f br=%dk ceil=%dk", self.fps, self.bitrate//1000, self._ceil_bitrate//1000)
+            log.info("fresh: fps=%.1f br=%dk ceil=%dk max=%dk", self.fps, self.bitrate//1000, self._ceil_bitrate//1000, self._max_br//1000)
 
     def on_screen_active(self):
         """Screen content changed after a static period — restore fps and jump toward last
@@ -308,7 +312,12 @@ class AdaptiveController:
                 step_ceil = max(self.bitrate * 2, self.bitrate + 500_000)
                 self.bitrate = max(self._min_br, min(target, step_ceil))
                 self.jpeg_quality = min(95, self.jpeg_quality + 20)
-            self._last_fast = time.monotonic()
+                # Only debounce on_fresh when we actually jump bitrate — setting
+                # _last_fast unconditionally fires on every frame boundary during
+                # active content (30fps captures × 40fps sender = frequent static→active
+                # micro-transitions) and permanently blocks the 2s fallback ramp path
+                # in on_fresh() when there are no client clear signals (e.g. background tab).
+                self._last_fast = time.monotonic()
             log.debug("screen active: fps=%.1f br=%dk ceil=%dk", self.fps, self.bitrate//1000, self._ceil_bitrate//1000)
 
     def snapshot(self):
