@@ -36,12 +36,16 @@ class EncoderPipeline:
                 ("h264_nvenc", {"preset": "p4", "tune": "ull", "rc": "vbr"}),
                 ("h264_qsv", {"preset": "veryfast"}),
                 ("h264_amf", {"usage": "ultralowlatency", "quality": "speed"}),
-                # threads=1: tune=zerolatency enables sliced-threads=1, splitting
-                # each frame into N slices (one per thread). Chrome WebCodecs
-                # hardware H264 decoder misdecodes multi-slice access units.
-                # Single thread → single slice per frame.
-                ("libx264", {"preset": "fast", "tune": "zerolatency", "threads": "1",
-                             "x264-params": "bframes=0:rc-lookahead=0:aq-mode=1"}),
+                # threads=1 + sliced-threads=0: tune=zerolatency sets
+                # sliced-threads=1 (N slices per frame matching thread count),
+                # which Chrome's WebCodecs H264 hardware decoder misdecodes.
+                # We omit tune=zerolatency entirely because it also sets
+                # no-mbtree=1, disabling macroblock-tree rate control and
+                # causing visible P-frame quality drift.  Instead we set only
+                # the needed low-latency params explicitly.
+                # force-cfr=1 + sync-lookahead=0 → immediate per-frame output.
+                ("libx264", {"preset": "fast", "threads": "1",
+                             "x264-params": "bframes=0:rc-lookahead=0:aq-mode=1:sliced-threads=0"}),
             ],
             CODEC_H265: [
                 ("hevc_nvenc", {"preset": "p4", "tune": "ull", "rc": "vbr"}),
