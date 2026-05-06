@@ -66,9 +66,14 @@ class EncoderPipeline:
                 ("av1_nvenc", {"preset": "p4", "tune": "ull", "rc": "vbr"}),
                 ("av1_qsv", {"preset": "veryfast"}),
                 ("av1_amf", {"usage": "ultralowlatency", "quality": "speed"}),
+                # pred-struct=1: low-delay GOP (no overlay/alt-ref frames). Default
+                # pred-struct=2 produces random-access bitstreams that Chrome's WebCodecs
+                # AV1 decoder accepts inconsistently — alt-ref frames in particular get
+                # rejected as out-of-order. enable-tf=0: temporal filtering also produces
+                # alt-ref-style references the browser stalls on.
                 ("libsvtav1", {"preset": "10",
-                               "svtav1-params": "film-grain=0:irefresh-type=2"}),
-                ("libaom-av1", {"cpu-used": "10", "usage": "realtime"}),
+                               "svtav1-params": "film-grain=0:irefresh-type=2:pred-struct=1:enable-tf=0:lookahead=0"}),
+                ("libaom-av1", {"cpu-used": "9", "usage": "realtime"}),
             ],
             CODEC_VP9: [
                 ("libvpx-vp9", {"deadline": "realtime", "cpu-used": "8",

@@ -175,6 +175,14 @@ def select_codec(server_caps, client_caps):
     group_priority = [("hw", "hw"), ("hw", "sw"), ("sw", "hw"), ("sw", "sw")]
     for s_kind, c_kind in group_priority:
         for codec in codec_priority:
+            # Auto-mode AV1 only when the SERVER has hardware AV1 (av1_nvenc/qsv/amf).
+            # libsvtav1's realtime preset-10 output is silently rejected by Chrome's
+            # WebCodecs AV1 decoder more often than it is accepted — the browser then
+            # signals webcodecs:false and the session falls to JPEG, even though h265
+            # would have worked. Hardware AV1 encoders produce far more conformant
+            # bitstreams. Users can still pick software AV1 manually.
+            if codec == "av1" and s_kind == "sw":
+                continue
             if (server_caps.get(codec, {}).get(s_kind)
                     and client_caps.get(codec, {}).get(c_kind)):
                 return _CLIENT_CODEC_MAP[codec], s_kind, c_kind
