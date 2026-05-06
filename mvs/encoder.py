@@ -72,6 +72,7 @@ class EncoderPipeline:
                 # subsequent P-frames have a known reference base.
                 dummy = _av.VideoFrame(cc.width, cc.height, "yuv420p")
                 dummy.pts = 0
+                dummy.pict_type = 1
                 dummy.key_frame = True
                 list(cc.encode(dummy))
                 self._last_pts = 0
@@ -144,6 +145,11 @@ class EncoderPipeline:
             pts = max(self._last_pts + 1, capture_ms)
             frame.pts = pts
             # key_frame=True → X264_TYPE_IDR (actual IDR, resets decoder DPB)
+            # libx264 via libavcodec requires BOTH flags to emit X264_TYPE_IDR:
+            #   pict_type = AV_PICTURE_TYPE_I  → enters the IDR/I-slice branch
+            #   key_frame = True               → selects IDR over I-slice within that branch
+            # key_frame alone → X264_TYPE_AUTO (P-frame, no forced keyframe).
+            frame.pict_type = 1
             frame.key_frame = True
             pkts = list(self._cc.encode(frame))
             self._last_pts = pts
