@@ -33,9 +33,13 @@ class EncoderPipeline:
         # lives in congestion.py and the websocket send loop.
         candidates = {
             CODEC_H264: [
-                ("h264_nvenc", {"preset": "p4", "tune": "ull", "rc": "vbr"}),
-                ("h264_qsv", {"preset": "veryfast"}),
-                ("h264_amf", {"usage": "ultralowlatency", "quality": "speed"}),
+                # bf=0: no B-frames. level=4.2 matches avc1.64002a codec string.
+                ("h264_nvenc", {"preset": "p4", "tune": "ull", "rc": "vbr",
+                                "bf": "0", "level": "4.2"}),
+                ("h264_qsv", {"preset": "veryfast", "look_ahead": "0",
+                              "low_power": "0"}),
+                ("h264_amf", {"usage": "ultralowlatency", "quality": "speed",
+                              "level": "4.2"}),
                 # threads=1 + sliced-threads=0: tune=zerolatency sets
                 # sliced-threads=1 (N slices per frame matching thread count),
                 # which Chrome's WebCodecs H264 hardware decoder misdecodes.
@@ -48,9 +52,16 @@ class EncoderPipeline:
                              "x264-params": "bframes=0:rc-lookahead=0:aq-mode=1:sliced-threads=0"}),
             ],
             CODEC_H265: [
-                ("hevc_nvenc", {"preset": "p4", "tune": "ull", "rc": "vbr"}),
-                ("hevc_qsv", {"preset": "veryfast"}),
-                ("hevc_amf", {"usage": "ultralowlatency", "quality": "speed"}),
+                # bf=0: no B-frames (low-latency screen capture). level=4.1 matches
+                # the codec string the frontend declares; without an explicit level
+                # nvenc may auto-pick a higher one and trigger the same DPB-undersize
+                # bug as libx265 did.
+                ("hevc_nvenc", {"preset": "p4", "tune": "ull", "rc": "vbr",
+                                "bf": "0", "level": "4.1"}),
+                ("hevc_qsv", {"preset": "veryfast", "look_ahead": "0",
+                              "low_power": "0"}),
+                ("hevc_amf", {"usage": "ultralowlatency", "quality": "speed",
+                              "level": "4.1"}),
                 # min-keyint=1: allows consecutive IDR frames when encode_keyframe()
                 # is retried during x265's 2-frame pipeline startup.
                 # no-sao + no-strong-intra-smoothing: SAO and intra smoothing blur
