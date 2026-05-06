@@ -8,6 +8,11 @@ from mvs.codec import (CODEC_JPEG, CODEC_H264, CODEC_H265, CODEC_AV1, CODEC_VP9,
 
 log = logging.getLogger("browser_screencast")
 
+# Software encoder names — no warmup needed (no hardware pipeline to prime).
+_SW_ENCODERS = frozenset({
+    "libx264", "libx265", "libsvtav1", "libaom-av1", "libvpx-vp9",
+})
+
 
 # ---------------------------------------------------------------------------
 # EncoderPipeline — per-client H.264/H.265 with JPEG fallback
@@ -31,15 +36,21 @@ class EncoderPipeline:
                 ("h264_nvenc", {"preset": "p4", "tune": "ull", "rc": "vbr"}),
                 ("h264_qsv", {"preset": "veryfast"}),
                 ("h264_amf", {"usage": "ultralowlatency", "quality": "speed"}),
-                ("libx264", {"preset": "fast", "tune": "zerolatency",
+                # threads=1: tune=zerolatency enables sliced-threads=1, splitting
+                # each frame into N slices (one per thread). Chrome WebCodecs
+                # hardware H264 decoder misdecodes multi-slice access units.
+                # Single thread → single slice per frame.
+                ("libx264", {"preset": "fast", "tune": "zerolatency", "threads": "1",
                              "x264-params": "bframes=0:rc-lookahead=0:aq-mode=1"}),
             ],
             CODEC_H265: [
                 ("hevc_nvenc", {"preset": "p4", "tune": "ull", "rc": "vbr"}),
                 ("hevc_qsv", {"preset": "veryfast"}),
                 ("hevc_amf", {"usage": "ultralowlatency", "quality": "speed"}),
+                # min-keyint=1: allows consecutive IDR frames when encode_keyframe()
+                # is retried during x265's 2-frame pipeline startup.
                 ("libx265", {"preset": "fast", "tune": "zerolatency",
-                             "x265-params": "bframes=0:rc-lookahead=0:aq-mode=1"}),
+                             "x265-params": "bframes=0:rc-lookahead=0:aq-mode=1:min-keyint=1"}),
             ],
             CODEC_AV1: [
                 ("av1_nvenc", {"preset": "p4", "tune": "ull", "rc": "vbr"}),
@@ -67,15 +78,18 @@ class EncoderPipeline:
                 cc.gop_size = 99999
                 cc.options = opts
                 cc.open()
-                # Warm up hardware encoder — first frame is buffered, discard it.
-                # key_frame=True ensures this discarded frame is a true IDR so
-                # subsequent P-frames have a known reference base.
-                dummy = _av.VideoFrame(cc.width, cc.height, "yuv420p")
-                dummy.pts = 0
-                dummy.pict_type = 1
-                dummy.key_frame = True
-                list(cc.encode(dummy))
-                self._last_pts = 0
+                # Hardware encoders buffer the first frame; encode a black IDR warmup
+                # to prime the pipeline so the first real frame is not delayed.
+                # Software encoders output immediately and have no pipeline to prime —
+                # skip warmup to avoid leaving a black IDR as their reference baseline
+                # (which would cause subsequent IDR requests to be downgraded to P-frames).
+                if name not in _SW_ENCODERS:
+                    dummy = _av.VideoFrame(cc.width, cc.height, "yuv420p")
+                    dummy.pts = 0
+                    dummy.pict_type = 1
+                    dummy.key_frame = True
+                    list(cc.encode(dummy))
+                    self._last_pts = 0
                 self._cc = cc
                 self.actual_codec = self.target_codec
                 log.info("Encoder: %s %dx%d @%dkbps", name, cc.width, cc.height, bitrate//1000)
@@ -131,6 +145,10 @@ class EncoderPipeline:
         VideoDecoder requires a real IDR for chunks marked type:'key'.  Setting
         frame.key_frame=True is the PyAV/libavcodec path that maps to IDR;
         frame.pict_type=AV_PICTURE_TYPE_I only produces an I-slice.
+
+        Pipelined encoders (libx265 2-frame threading) may output a queued P-frame
+        while the actual IDR is still in the pipeline.  Returning None here signals
+        the caller to retry — the handler re-sets _need_keyframe and tries again.
         """
         if self._cc is None:
             return _encode_jpeg(self._to_rgb(rgb), quality), True, CODEC_JPEG
@@ -157,7 +175,13 @@ class EncoderPipeline:
             log.debug("encode_keyframe err: %s", e)
         if not pkts:
             return None, False, self.actual_codec
-        return bytes(pkts[0]), True, self.actual_codec
+        pkt = pkts[0]
+        # Pipelined encoders output the previously buffered frame when a new one is
+        # submitted.  If the output is not a keyframe, the IDR request is still in
+        # the pipeline — discard the stale P-frame and signal retry.
+        if not bool(getattr(pkt, "is_keyframe", True)):
+            return None, False, self.actual_codec
+        return bytes(pkt), True, self.actual_codec
 
     def close(self):
         if self._cc:

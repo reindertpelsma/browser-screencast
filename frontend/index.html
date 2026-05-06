@@ -282,7 +282,7 @@ let decoder=null,decoderCodec=-1;
 
 // Codec byte → WebCodecs codec string
 const CODEC_STRINGS={
-  1:'avc1.640028',       // H.264 High Profile Level 4.0
+  1:'avc1.64002a',       // H.264 High Profile Level 4.2
   2:'hev1.1.6.L93.B0',  // H.265 Main Profile
   3:'av01.0.08M.08',    // AV1 Main Profile Level 4.0
   4:'vp09.00.10.08',    // VP9 Profile 0
@@ -299,7 +299,7 @@ async function probeSupportedCodecs(){
     {name:'av1', codec:'av01.0.08M.08'},
     {name:'h265',codec:'hev1.1.6.L93.B0'},
     {name:'vp9', codec:'vp09.00.10.08'},
-    {name:'h264',codec:'avc1.640028'},
+    {name:'h264',codec:'avc1.64002a'},
   ];
   const out=[];
   for(const p of probes){
