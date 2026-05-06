@@ -1,0 +1,113 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    name: Build ${{ matrix.os }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+            runner: ubuntu-22.04
+          - os: linux
+            arch: arm64
+            runner: ubuntu-22.04-arm
+          - os: windows
+            arch: amd64
+            runner: windows-2022
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system deps (Linux)
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q \
+            python3-xlib libx11-dev \
+            ffmpeg libavcodec-dev libavformat-dev libavutil-dev libswscale-dev
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip pyinstaller
+          pip install -r requirements.txt
+
+      - name: Build with PyInstaller (Linux)
+        if: matrix.os == 'linux'
+        run: |
+          pyinstaller \
+            --onefile \
+            --name browser-screencast \
+            --hidden-import av \
+            --hidden-import Xlib \
+            --hidden-import Xlib.display \
+            --hidden-import Xlib.ext.xtest \
+            --collect-all av \
+            server.py
+          ls -lh dist/
+
+      - name: Build with PyInstaller (Windows)
+        if: matrix.os == 'windows'
+        run: |
+          pyinstaller `
+            --onefile `
+            --name browser-screencast `
+            --hidden-import av `
+            --collect-all av `
+            server.py
+          dir dist\
+
+      - name: Upload binary (Linux)
+        if: matrix.os == 'linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-screencast-linux-${{ matrix.arch }}
+          path: dist/browser-screencast
+
+      - name: Upload binary (Windows)
+        if: matrix.os == 'windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-screencast-windows-${{ matrix.arch }}
+          path: dist/browser-screencast.exe
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+
+      - name: Rename artifacts
+        run: |
+          mkdir -p release
+          cp dist/browser-screencast-linux-amd64/browser-screencast  release/browser-screencast-linux-amd64
+          cp dist/browser-screencast-linux-arm64/browser-screencast  release/browser-screencast-linux-arm64
+          cp dist/browser-screencast-windows-amd64/browser-screencast.exe release/browser-screencast-windows-amd64.exe
+          ls -lh release/
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true

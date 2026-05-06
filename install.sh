@@ -16,6 +16,9 @@
 
 set -euo pipefail
 
+REPO_URL="${BROWSER_SCREENCAST_REPO:-https://github.com/reindertpelsma/browser-screencast}"
+RELEASES_API="https://api.github.com/repos/reindertpelsma/browser-screencast/releases/latest"
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 green()  { printf '\033[32m%s\033[0m\n' "$*"; }
 yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
@@ -47,23 +50,26 @@ WITH_SYSTEMD=0
 HEADLESS=0
 SKIP_DEPS=0
 START_NOW=0
+FORCE_FROM_SOURCE=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --port)     PORT="$2"; shift 2 ;;
-        --systemd)  WITH_SYSTEMD=1; shift ;;
-        --headless) HEADLESS=1; shift ;;
-        --no-deps)  SKIP_DEPS=1; shift ;;
-        --start)    START_NOW=1; shift ;;
+        --port)             PORT="$2"; shift 2 ;;
+        --systemd)          WITH_SYSTEMD=1; shift ;;
+        --headless)         HEADLESS=1; shift ;;
+        --no-deps)          SKIP_DEPS=1; shift ;;
+        --start)            START_NOW=1; shift ;;
+        --from-source)      FORCE_FROM_SOURCE=1; shift ;;
         --help|-h)
             cat <<'HELP'
 browser-screencast installer
 
-  --port PORT    web listen port (default 6081)
-  --headless     start Xvfb + window manager (no physical display needed)
-  --systemd      install and enable a systemd --user unit
-  --no-deps      skip Python and system dependency installation
-  --start        start server in the foreground after setup
+  --port PORT      web listen port (default 6081)
+  --headless       start Xvfb + window manager (no physical display needed)
+  --systemd        install and enable a systemd --user unit
+  --no-deps        skip Python and system dependency installation
+  --from-source    skip pre-built binary, install from Python source
+  --start          start server in the foreground after setup
 HELP
             exit 0 ;;
         *) die "Unknown option: $1" ;;
@@ -71,6 +77,77 @@ HELP
 done
 
 step "browser-screencast installer"
+
+# ── Pre-built binary (fast path — no Python required) ─────────────────────────
+# Try to download a pre-built binary from the latest GitHub release. This works
+# on hosts without Python or pip, and is significantly faster than a source install.
+# Fall through to the Python path if: no release exists, download fails, or
+# --from-source was requested.
+if [[ "$FORCE_FROM_SOURCE" -eq 0 && "$SKIP_DEPS" -eq 0 ]]; then
+    ARCH="$(uname -m)"
+    case "$ARCH" in
+        x86_64)  ASSET="browser-screencast-linux-amd64" ;;
+        aarch64|arm64) ASSET="browser-screencast-linux-arm64" ;;
+        *)       ASSET="" ;;
+    esac
+    if [[ -n "$ASSET" ]] && command -v curl >/dev/null 2>&1; then
+        step "Checking for pre-built binary"
+        RELEASE_JSON="$(curl -fsSL "$RELEASES_API" 2>/dev/null || true)"
+        RELEASE_TAG="$(printf '%s' "$RELEASE_JSON" | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+        ASSET_URL="$(printf '%s' "$RELEASE_JSON" \
+            | tr ',' '\n' \
+            | grep -E "browser_download_url.*${ASSET}\"" \
+            | sed -n 's/.*"browser_download_url":[[:space:]]*"\([^"]*\)".*/\1/p' \
+            | head -1)"
+        if [[ -n "$ASSET_URL" ]]; then
+            green "  Found release ${RELEASE_TAG} → ${ASSET}"
+            mkdir -p "$BIN_DIR" "$CONFIG_DIR"
+            if curl -fsSL "$ASSET_URL" -o "$BIN_DIR/browser-screencast" 2>/dev/null; then
+                chmod +x "$BIN_DIR/browser-screencast"
+                green "  Binary installed: $BIN_DIR/browser-screencast"
+
+                # Token
+                TOKEN_FILE="$CONFIG_DIR/token"
+                if [[ ! -s "$TOKEN_FILE" ]]; then
+                    python3 -c "import secrets; print(secrets.token_urlsafe(24))" \
+                        > "$TOKEN_FILE" 2>/dev/null \
+                    || openssl rand -base64 18 | tr -d '/' > "$TOKEN_FILE" 2>/dev/null \
+                    || head -c 18 /dev/urandom | base64 | tr -d '/' > "$TOKEN_FILE"
+                    chmod 600 "$TOKEN_FILE"
+                fi
+                TOKEN="$(cat "$TOKEN_FILE")"
+
+                # Wrap binary so token is always passed
+                TMP_BIN="$(mktemp)"
+                cat > "$TMP_BIN" <<WRAPPER
+#!/usr/bin/env sh
+exec "$BIN_DIR/browser-screencast" --password "$TOKEN" "\$@"
+WRAPPER
+                mv "$TMP_BIN" "$BIN_DIR/browser-screencast"
+                chmod +x "$BIN_DIR/browser-screencast"
+
+                echo
+                green "browser-screencast installed (pre-built binary)."
+                echo "  Token:  $TOKEN"
+                echo "  Run:    $BIN_DIR/browser-screencast --port $PORT"
+                echo "  SSH:    ssh -L $PORT:localhost:$PORT user@<host>"
+                echo "  Open:   http://localhost:$PORT/?token=$TOKEN"
+                [[ ":$PATH:" != *":$BIN_DIR:"* ]] && yellow "  Add $BIN_DIR to PATH or use the full path above."
+                if [[ "$START_NOW" -eq 1 ]]; then
+                    step "Starting server"
+                    ARGS="--port $PORT"
+                    [[ "$HEADLESS" -eq 1 ]] && ARGS="$ARGS --headless --capture x11grab --input x11"
+                    exec "$BIN_DIR/browser-screencast" $ARGS
+                fi
+                exit 0
+            else
+                yellow "  Binary download failed — falling back to Python source install."
+            fi
+        else
+            yellow "  No pre-built binary for ${ASSET} yet — using Python source install."
+        fi
+    fi
+fi
 
 # ── Python ────────────────────────────────────────────────────────────────────
 PYTHON="${PYTHON:-}"
