@@ -67,9 +67,12 @@ class EncoderPipeline:
                 cc.gop_size = 99999
                 cc.options = opts
                 cc.open()
-                # Warm up hardware encoder — first frame is buffered, discard it
+                # Warm up hardware encoder — first frame is buffered, discard it.
+                # key_frame=True ensures this discarded frame is a true IDR so
+                # subsequent P-frames have a known reference base.
                 dummy = _av.VideoFrame(cc.width, cc.height, "yuv420p")
                 dummy.pts = 0
+                dummy.key_frame = True
                 list(cc.encode(dummy))
                 self._last_pts = 0
                 self._cc = cc
@@ -120,13 +123,16 @@ class EncoderPipeline:
             return _encode_jpeg(self._to_rgb(rgb), jpeg_quality), True, CODEC_JPEG
 
     def encode_keyframe(self, rgb, capture_ms, quality):
-        """Force an I-frame refresh after an extended static period."""
+        """Force an IDR frame — a true decoder-reset point, not just an I-slice.
+
+        libx264 distinguishes X264_TYPE_I (I-slice, cannot reset decoder DPB)
+        from X264_TYPE_IDR (IDR, resets reference picture buffer).  WebCodecs
+        VideoDecoder requires a real IDR for chunks marked type:'key'.  Setting
+        frame.key_frame=True is the PyAV/libavcodec path that maps to IDR;
+        frame.pict_type=AV_PICTURE_TYPE_I only produces an I-slice.
+        """
         if self._cc is None:
             return _encode_jpeg(self._to_rgb(rgb), quality), True, CODEC_JPEG
-        try:
-            self._cc.gop_size = 1
-        except Exception:
-            pass
         pkts = []
         try:
             fmt = "bgra" if (rgb.ndim == 3 and rgb.shape[2] == 4) else "rgb24"
@@ -137,18 +143,12 @@ class EncoderPipeline:
             frame = frame.reformat(format="yuv420p")
             pts = max(self._last_pts + 1, capture_ms)
             frame.pts = pts
-            try:
-                frame.pict_type = 1   # AV_PICTURE_TYPE_I
-            except Exception:
-                pass
+            # key_frame=True → X264_TYPE_IDR (actual IDR, resets decoder DPB)
+            frame.key_frame = True
             pkts = list(self._cc.encode(frame))
             self._last_pts = pts
         except Exception as e:
             log.debug("encode_keyframe err: %s", e)
-        try:
-            self._cc.gop_size = 99999
-        except Exception:
-            pass
         if not pkts:
             return None, False, self.actual_codec
         return bytes(pkts[0]), True, self.actual_codec
