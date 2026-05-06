@@ -290,7 +290,11 @@ class X11Input(NullInput):
         try:
             from Xlib.ext import xtest
             xtest.fake_input(self._display, event_type, detail=detail, x=x, y=y)
-            self._display.sync()
+            # flush() sends the request to the X server without waiting for a reply.
+            # sync() (the former implementation) does a full round-trip, which blocks
+            # the asyncio event loop on every keystroke — the source of keyboard lag
+            # under SSH. XTest events are fire-and-forget; no reply is needed.
+            self._display.flush()
             return True
         except Exception as e:
             log.debug("XTest input failed: %s", e)
