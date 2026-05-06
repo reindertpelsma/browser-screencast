@@ -268,9 +268,12 @@ async def client_session(ws, cfg, bridge):
                         wb = _get_wbuf(ws)
                         ctrl.on_lag(age, wb)
                         _last_lag_received = time.monotonic()
-                        # Positive path: low-lag report = client confirming path is clear.
-                        # Unlocks next ramp step in on_fresh without waiting the full 2s heuristic.
-                        if age > 0 and age < ctrl.lag_budget_ms() and wb < ctrl.lag_wb_budget():
+                        # Positive path: clear signal → unlock next ramp step without
+                        # waiting the full 2s heuristic.
+                        # wb == 0 is a reliable "link not congested" indicator regardless
+                        # of age (age is dominated by base RTT + encoder variance on fast
+                        # links).  Age < budget with any wb also qualifies.
+                        if wb == 0 or (age > 0 and age < ctrl.lag_budget_ms() and wb < ctrl.lag_wb_budget()):
                             ctrl.on_client_clear()
                     elif t == "metric_rtt":
                         ctrl.on_metric_rtt(float(ev.get("rtt_ms", 0)))
