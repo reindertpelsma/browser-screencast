@@ -143,7 +143,7 @@ async def client_session(ws, cfg, bridge):
     _last_lag_received = 0.0   # set on first lag report; 0 = never received (skip proactive backoff)
 
     def _upgrade_encoder(tw: int = 0, th: int = 0, explicit: bool = False):
-        nonlocal encoder, has_webcodecs, _enc_target_w, _enc_target_h, _codec_error_msg
+        nonlocal encoder, has_webcodecs, _enc_target_w, _enc_target_h, _codec_error_msg, _need_keyframe
         if not has_webcodecs:
             # Client doesn't support WebCodecs (or revoked it after an error).
             # Downgrade to JPEG so the client's JPEG path actually gets JPEG frames.
@@ -195,6 +195,13 @@ async def client_session(ws, cfg, bridge):
         encoder = new_enc
         _enc_target_w, _enc_target_h = tw, th
         old.close()
+        # Every new EncoderPipeline starts its reference chain from a discarded warmup
+        # frame. The browser's VideoDecoder has never seen that frame, so the first
+        # real packet must be an I-frame. This fires on BOTH codec changes (JPEG→H264)
+        # AND resolution-only reinits (H264@720p→H264@1080p) — the existing codec-change
+        # detection in frame_sender misses the latter case entirely.
+        if encoder.actual_codec != CODEC_JPEG:
+            _need_keyframe = True
 
     loop = asyncio.get_event_loop()
 
