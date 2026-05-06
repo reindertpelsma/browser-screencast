@@ -10,7 +10,7 @@ HEADROOM_PCT = 80.0
 class CpuSampler(threading.Thread):
     def __init__(self):
         super().__init__(daemon=True)
-        self._stop = threading.Event()
+        self._stop_ev = threading.Event()
         self.max_python = 0.0
         self.samples = 0
 
@@ -18,7 +18,7 @@ class CpuSampler(threading.Thread):
         pid = self._find_pid("python3 server.py") or self._find_pid("python server.py") or self._find_pid("server.py")
         if pid is None:
             return
-        while not self._stop.is_set():
+        while not self._stop_ev.is_set():
             self._sample(pid)
             self.samples += 1
             time.sleep(0.5)
@@ -41,7 +41,7 @@ class CpuSampler(threading.Thread):
             return None
 
     def stop(self, timeout=2.0):
-        self._stop.set()
+        self._stop_ev.set()
         self.join(timeout=timeout)
 
     @property

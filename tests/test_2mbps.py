@@ -46,6 +46,10 @@ MAX_LAG_MS  = int(os.environ.get("MAX_LAG_MS", "2000"))     # steady-state max l
 TAIL_S      = float(os.environ.get("TAIL_S", "15.0"))
 MIN_PEAK_LAG_MS = int(os.environ.get("MIN_PEAK_LAG_MS", "0"))
 ALLOW_CPU_EXEMPTIONS = os.environ.get("ALLOW_CPU_EXEMPTIONS", "0") == "1"
+# CODEC=h264|h265|av1|vp9  — codec to negotiate with the server. Default h264.
+# Set CODEC_EXPLICIT=1 to force the server to use exactly that codec (no cascade).
+CODEC          = os.environ.get("CODEC", "h264").lower().replace("hevc", "h265")
+CODEC_EXPLICIT = os.environ.get("CODEC_EXPLICIT", "0") == "1"
 
 WS_URL = f"ws://{HOST}:{PORT}/" + (f"?token={TOKEN}" if TOKEN else "")
 RATE   = RATE_BPS / 8     # bytes per second
@@ -85,9 +89,9 @@ async def main():
             await ws.send(json.dumps({
                 "t": "caps",
                 "webcodecs": True,
-                "codecs": ["h264"],
-                "codecCaps": {"h264": {"hw": False, "sw": True}},
-                "explicit": False,
+                "codecs": [CODEC],
+                "codecCaps": {CODEC: {"hw": False, "sw": True}},
+                "explicit": CODEC_EXPLICIT,
                 "w": 1280, "h": 720,
             }))
 

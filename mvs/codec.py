@@ -1,3 +1,4 @@
+import fractions
 import logging
 import os
 import platform
@@ -122,10 +123,27 @@ def probe_server_codecs() -> dict:
 
 @lru_cache(maxsize=None)
 def _pyav_codec_known(name: str) -> bool:
+    """Return True only if the codec can actually be opened, not just created.
+
+    `av.CodecContext.create(name, "w")` always succeeds for any codec name the
+    FFmpeg build knows — it does not check whether the underlying hardware driver
+    can actually initialise.  For NVENC in particular, av1_nvenc on Ampere
+    (RTX 30xx) returns ENOSYS from avcodec_open2 because AV1 NVENC was only added
+    in Ada Lovelace.  We must call open() to catch that.
+    """
     if not _AV_OK:
         return False
     try:
-        _av.CodecContext.create(name, "w")
+        cc = _av.CodecContext.create(name, "w")
+        cc.width = 640
+        cc.height = 480
+        cc.pix_fmt = "yuv420p"
+        cc.time_base = fractions.Fraction(1, 1000)
+        cc.framerate = fractions.Fraction(60, 1)
+        cc.bit_rate = 500_000
+        cc.gop_size = 300
+        cc.open()
+        # VideoCodecContext has no close() — let cc go out of scope.
         return True
     except Exception:
         return False

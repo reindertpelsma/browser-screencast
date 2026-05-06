@@ -77,13 +77,16 @@ class EncoderPipeline:
                 ("av1_nvenc", {"preset": "p4", "tune": "ull", "rc": "vbr"}),
                 ("av1_qsv", {"preset": "veryfast"}),
                 ("av1_amf", {"usage": "ultralowlatency", "quality": "speed"}),
-                # pred-struct=1: low-delay GOP (no overlay/alt-ref frames). Default
-                # pred-struct=2 produces random-access bitstreams that Chrome's WebCodecs
-                # AV1 decoder accepts inconsistently — alt-ref frames in particular get
-                # rejected as out-of-order. enable-tf=0: temporal filtering also produces
-                # alt-ref-style references the browser stalls on.
+                # enable-tf=0: temporal filtering produces alt-ref-style references
+                # that Chrome's WebCodecs AV1 decoder stalls on (out-of-order frames).
+                # low-delay=1: force low-delay (P-frame only) prediction structure so
+                # the encoder outputs each frame immediately without buffering a
+                # lookahead window. Replaces pred-struct=1 which was removed in
+                # SVT-AV1 v2+. Without low-delay=1, v3.x uses random-access mode and
+                # overrides lookahead=0 with a forced minimum of 20 frames.
+                # irefresh-type=2: IDR refresh so forced keyframes flush immediately.
                 ("libsvtav1", {"preset": "10",
-                               "svtav1-params": "film-grain=0:irefresh-type=2:pred-struct=1:enable-tf=0:lookahead=0"}),
+                               "svtav1-params": "film-grain=0:irefresh-type=2:enable-tf=0:lookahead=0:low-delay=1"}),
                 ("libaom-av1", {"cpu-used": "9", "usage": "realtime"}),
             ],
             CODEC_VP9: [
@@ -109,9 +112,12 @@ class EncoderPipeline:
                 cc.open()
                 # Hardware encoders buffer the first frame; encode a black IDR warmup
                 # to prime the pipeline so the first real frame is not delayed.
-                # Software encoders output immediately and have no pipeline to prime —
-                # skip warmup to avoid leaving a black IDR as their reference baseline
-                # (which would cause subsequent IDR requests to be downgraded to P-frames).
+                # libsvtav1 forces a 20-frame lookahead regardless of options (preset
+                # 10 uses a 5-level hierarchy that needs 20 frames to plan). Pre-fill
+                # the lookahead with dummy black frames so the first real capture frame
+                # produces output immediately instead of waiting for 20 captures.
+                # Other pure-output software encoders (libx264/libx265/libvpx-vp9)
+                # output on the first frame and don't need priming.
                 if name not in _SW_ENCODERS:
                     dummy = _av.VideoFrame(cc.width, cc.height, "yuv420p")
                     dummy.pts = 0
@@ -119,6 +125,12 @@ class EncoderPipeline:
                     dummy.key_frame = True
                     list(cc.encode(dummy))
                     self._last_pts = 0
+                elif name == "libsvtav1":
+                    dummy = _av.VideoFrame(cc.width, cc.height, "yuv420p")
+                    for i in range(25):  # fill 20-frame lookahead + 5 spare
+                        dummy.pts = i
+                        list(cc.encode(dummy))
+                    self._last_pts = 24
                 self._cc = cc
                 self.actual_codec = self.target_codec
                 log.info("Encoder: %s %dx%d @%dkbps", name, cc.width, cc.height, bitrate//1000)
