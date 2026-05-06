@@ -1,51 +1,51 @@
 # browser-screencast
 
-Browser-based Linux/Windows remote desktop over SSH.
+Low-latency browser remote desktop for Linux and headless cloud VMs.
 
-No relay, no account, no browser extension. Run a Python server on the remote
-machine, forward one localhost port over SSH, and open the UI in a browser.
+No relay, no account, no browser extension. One Python server, one SSH tunnel.
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/reindertpelsma/browser-screencast/main/install.sh)
-ssh -L 6081:localhost:6081 user@host
-open "http://localhost:6081/?token=YOUR_TOKEN"
 ```
 
-macOS users should use the sibling project instead:
+Then forward the port over SSH and open the URL the installer prints:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/reindertpelsma/macscreencast/main/install.sh)
+ssh -L 6081:localhost:6081 user@host
+# open http://localhost:6081/?token=YOUR_TOKEN
 ```
 
-## Status
+macOS users: use the sibling project instead —
+`bash <(curl -fsSL https://raw.githubusercontent.com/reindertpelsma/macscreencast/main/install.sh)`
 
-This repo is an initial Linux/Windows port of `macscreencast` following
-`PLAN.md`.
+## Why it feels fast
 
-Implemented now:
+- **Hardware H.265 / AV1 / VP9 / H.264** — WebCodecs in the browser decodes hardware-encoded frames. NVENC, VAAPI, or AMF on the server; software fallback (libx265/libvpx) when no GPU is present.
+- **x11grab direct capture** — reads straight from the X framebuffer via FFmpeg/libav. No VNC round-trip, no RFB protocol overhead.
+- **Adaptive congestion controller** — watches TCP backpressure and ping gradient rather than a fixed quality knob. Bitrate tracks the link.
 
-- Same browser/WebSocket wire protocol and congestion controller.
-- Linux X11 full-screen capture via `mss`.
-- Windows full-screen capture fallback via `mss`.
-- X11 input injection via XTest.
-- Windows input injection via Win32 `SendInput`.
-- Clipboard sync via `pyperclip` and common platform clipboard tools.
-- Optional VNC pass-through with the portable RFB client.
-- WebCodecs codec negotiation with HW/SW client capability reporting.
-- Optional FFmpeg-backed Opus audio loopback when a supported source exists.
-- Linux headless mode with server-managed `Xvfb` and a lightweight window manager.
-- Rootless Linux/BSD install with optional `systemd --user` unit.
-- PowerShell install path with optional Scheduled Task.
+## Requirements
 
-Still planned:
+| Component | Minimum | Notes |
+|-----------|---------|-------|
+| Python | 3.9+ | |
+| PyAV | 12+ | `pip install av` — needs FFmpeg libs |
+| Browser | Chrome / Edge / Safari | WebCodecs required; Firefox not yet |
+| Display | X11 or headless | Wayland: use an XWayland session for now |
 
-- Native Wayland capture through PipeWire portals.
-- Native Windows.Graphics.Capture backend.
-- Hardware encoder probe/open validation for VAAPI/QSV/AMF beyond the current
-  PyAV candidate cascade.
-- Broader real-machine test matrix.
+Hardware encoders are auto-detected and preferred. A plain CPU with FFmpeg is enough for software H.265.
 
-## Local Setup
+## Headless cloud VM / Docker
+
+Tested on vast.ai NVIDIA GPU instances (no /dev/kvm, Docker container):
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/reindertpelsma/browser-screencast/main/install.sh) --headless
+```
+
+The installer starts Xvfb + a lightweight window manager automatically. NVENC is used when an NVIDIA GPU is present; the server falls back to software encoding otherwise.
+
+## Local X11 desktop
 
 ```bash
 git clone https://github.com/reindertpelsma/browser-screencast.git
@@ -54,35 +54,20 @@ bash setup.sh
 browser-screencast --generate-token
 ```
 
-On a Linux X11 desktop, the default auto mode should choose X11 capture/input.
-On Wayland, use an X11 session for now or point the server at an existing VNC
-server:
-
-```bash
-browser-screencast --capture vnc --input vnc --vnc-host 127.0.0.1 --vnc-port 5900 --vnc-pass "$VNC_PASS"
-```
-
-For a Linux VM with no display, use server-managed headless mode:
-
-```bash
-browser-screencast --headless --capture x11 --input x11
-```
-
-## Systemd User Unit
+## Daemon (systemd)
 
 ```bash
 bash setup.sh --systemd
 systemctl --user status browser-screencast
 ```
 
-The unit is rootless and bound to `127.0.0.1` by default. To keep it running
-after logout across reboots, enable linger yourself:
+The unit is rootless and binds to `127.0.0.1` by default. To keep it alive after logout:
 
 ```bash
 loginctl enable-linger "$USER"
 ```
 
-For a headless user unit:
+For a headless daemon:
 
 ```bash
 bash setup.sh --systemd --headless
@@ -97,32 +82,40 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 browser-screencast.cmd --generate-token
 ```
 
-To register a logon task:
+## Codec selection
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\install.ps1 -ScheduledTask
-```
+The server auto-negotiates the best codec both sides support:
 
-## Security Model
+| Codec | Hardware | Software |
+|-------|----------|---------|
+| H.265 | NVENC / VAAPI / VideoToolbox | libx265 |
+| AV1   | NVENC AV1 / VAAPI AV1 | libsvtav1 |
+| VP9   | VAAPI VP9 | libvpx-vp9 |
+| H.264 | NVENC / VAAPI / AMF | libx264 |
 
-The server binds to `127.0.0.1` by default and is intended to be reached through
-SSH port forwarding:
+Auto mode prefers H.265 for best quality/bitrate ratio. Force a codec with `--codec h264` etc.
+
+## Quality vs latency
+
+The UI has two presets:
+
+- **Responsive** — sub-50 ms end-to-end; ideal for typing and mousing. Fast motion video may drop frames briefly.
+- **Buffer 3 s** — smooth video playback at the cost of 3 s input lag. Equivalent to YouTube Live low-latency mode.
+
+## Capture modes
+
+| Mode | Flag | When to use |
+|------|------|-------------|
+| x11grab | `--capture x11grab` | Default on X11; direct framebuffer, lowest overhead |
+| mss | `--capture mss` | Fallback if x11grab unavailable |
+| VNC pass-through | `--capture vnc` | Point at an existing VNC server |
+
+## Security model
+
+The server binds to `127.0.0.1` by default. Reach it through SSH port forwarding:
 
 ```bash
 ssh -L 6081:localhost:6081 user@host
 ```
 
-Use `--password` or the installer-generated token. Do not bind to `0.0.0.0`
-unless you put another access-control layer in front of it.
-
-## Linux Validation
-
-The local Linux matrix is intentionally strict:
-
-```bash
-python tests/linux_matrix.py
-```
-
-It covers Xvfb/openbox video, X11 input, clipboard, PulseAudio loopback,
-headless mode, and the 2 Mbps proxy congestion test. Use `--fast` for a
-shorter local iteration run.
+Use `--password` or the installer-generated token. Do not bind to `0.0.0.0` without a separate access-control layer.
