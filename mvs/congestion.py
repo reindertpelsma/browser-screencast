@@ -165,7 +165,7 @@ class AdaptiveController:
         8× tolerates a typical burst without backoff; the RTT-budget term still
         fires when the buffer stays elevated across multiple frames (real congestion)."""
         avg_frame = int(self.bitrate / max(1.0, self.fps) / 8)  # bytes per average frame
-        return max(8 * avg_frame, 16 * 1024, int(self.lag_budget_ms() * self.bitrate / 8000))
+        return max(16 * avg_frame, 64 * 1024, int(self.lag_budget_ms() * self.bitrate / 8000))
 
     def on_lag(self, age_ms, write_buf=0):
         budget = self.lag_budget_ms()

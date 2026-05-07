@@ -368,7 +368,7 @@ async def client_session(ws, cfg, bridge):
                     await ws.send(json.dumps({"t": "clipboard", "text": bridge.server_clipboard, "seq": sc}))
                 except Exception:
                     pass
-        nonlocal _enc_target_w, _enc_target_h, _reinit_deadline, _need_keyframe, _last_lag_received
+        nonlocal _enc_target_w, _enc_target_h, _reinit_deadline, _need_keyframe, _last_lag_received, _last_sent_bytes
         last_encoder_codec = encoder.actual_codec
         _bw_sent = []       # list of (monotonic_time, bytes) for rolling 1s bandwidth measurement
         _t_diag = time.monotonic(); _n_diag = 0; _n_drop = 0; _n_nosend = 0
@@ -384,6 +384,8 @@ async def client_session(ws, cfg, bridge):
         _static_since = 0.0     # monotonic time when current static period started
         _refresh_br = 0         # bitrate at which last static heartbeat was sent
         _refresh_t = 0.0        # monotonic time of last static heartbeat
+        _last_sent_bytes = 0    # bytes in the last ws.send(); subtracted from wb to avoid
+                                # counting just-sent frame data as congestion backpressure
         try:
             while True:
                 now = time.monotonic()
@@ -486,8 +488,15 @@ async def client_session(ws, cfg, bridge):
                             await asyncio.sleep(0.05)
                             continue
 
-                if wb > ctrl.lag_wb_budget():
-                    ctrl.on_lag(0, wb)
+                # Effective write buffer: subtract the last frame we just sent.
+                # H.264 VBR keyframes (30-50KB) land entirely in the TCP write buffer
+                # immediately after ws.send(); asyncio.sleep(0) gives the event loop
+                # one turn which drains at most ~2KB at 1Mbps. Without this adjustment,
+                # the 64KB wb_budget check fires on the keyframe bytes we just pushed —
+                # bytes that are being drained normally, not accumulated backpressure.
+                _eff_wb = max(0, wb - _last_sent_bytes)
+                if _eff_wb > ctrl.lag_wb_budget():
+                    ctrl.on_lag(0, _eff_wb)
                     if _pipe_task is not None and has_webcodecs:
                         pass
                     else:
@@ -545,6 +554,7 @@ async def client_session(ws, cfg, bridge):
                                         hdr_s = _hdr(seq_num, int(time.time() * 1000),
                                                      codec_s, is_kf_s, len(payload_s))
                                         await ws.send(hdr_s + payload_s)
+                                        _last_sent_bytes = len(hdr_s) + len(payload_s)
                                         _n_diag += 1
                                         log.debug("static heartbeat: %dkbps q=%d", br_s // 1000, quality)
                                 except Exception as e:
@@ -598,8 +608,9 @@ async def client_session(ws, cfg, bridge):
                 if to_sleep > 0.001:
                     await asyncio.sleep(to_sleep)
                     wb = _get_wbuf(ws)
-                    if wb > ctrl.lag_wb_budget():
-                        ctrl.on_lag(0, wb)
+                    _eff_wb = max(0, wb - _last_sent_bytes)
+                    if _eff_wb > ctrl.lag_wb_budget():
+                        ctrl.on_lag(0, _eff_wb)
                         if _pipe_task is None or not has_webcodecs:
                             _n_drop += 1
                             if _pipe_task is not None:
@@ -662,8 +673,9 @@ async def client_session(ws, cfg, bridge):
                 ctrl.on_fresh(0 if _bridge_static else len(payload))
 
                 wb = _get_wbuf(ws)
-                if wb > ctrl.lag_wb_budget():
-                    ctrl.on_lag(0, wb)
+                _eff_wb = max(0, wb - _last_sent_bytes)
+                if _eff_wb > ctrl.lag_wb_budget():
+                    ctrl.on_lag(0, _eff_wb)
                     if not has_webcodecs:
                         _n_drop += 1
                         continue
@@ -699,6 +711,7 @@ async def client_session(ws, cfg, bridge):
                 hdr = _hdr(seq_num, int(time.time() * 1000), codec_byte, is_kf, len(payload))
                 try:
                     await ws.send(hdr + payload)
+                    _last_sent_bytes = len(hdr) + len(payload)
                 except Exception as e:
                     log.debug("send err: %s", e); break
 
