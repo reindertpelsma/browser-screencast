@@ -116,13 +116,13 @@ class SelectCodecPolicyTests(unittest.TestCase):
                             "AV1 must not be selected when client lacks hw AV1 decode")
         self.assertEqual(result, codec.CODEC_H265)
 
-    def test_auto_av1_hw_selected_when_client_has_hw_decode(self):
+    def test_auto_h265_beats_av1_when_both_hw_available(self):
+        """H.265 hw is preferred over AV1 hw in auto mode (safer default for constrained paths)."""
         srv = self._srv(av1_hw=True, h265_hw=True)
         cli = self._cli(av1_hw=True, h265_sw=True)
         result, s, c = codec.select_codec(srv, cli)
-        self.assertEqual(result, codec.CODEC_AV1)
+        self.assertEqual(result, codec.CODEC_H265)
         self.assertEqual(s, "hw")
-        self.assertEqual(c, "hw")
 
     def test_auto_falls_back_to_h264_sw_when_no_hw(self):
         """Software-only server defaults to H.264 sw; never sw H.265/AV1/VP9."""

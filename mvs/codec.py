@@ -50,7 +50,7 @@ def _encode_jpeg(rgb, quality):
 # ---------------------------------------------------------------------------
 CODEC_JPEG, CODEC_H264, CODEC_H265, CODEC_AV1, CODEC_VP9 = 0, 1, 2, 3, 4
 
-_CODEC_PREFERENCE = [CODEC_AV1, CODEC_H265, CODEC_VP9, CODEC_H264]
+_CODEC_PREFERENCE = [CODEC_H265, CODEC_AV1, CODEC_VP9, CODEC_H264]
 _CODEC_NAME = {
     CODEC_H264: "h264",
     CODEC_H265: "h265",
@@ -219,8 +219,12 @@ def select_codec(server_caps, client_caps, explicit=False):
         ]
     else:
         candidates = [
-            ("av1",  "hw", "hw"),           # AV1: hw/hw only — client hw decode gate
+            # H.265 hw first: proven compat with Chrome WebCodecs across hardware.
+            # AV1 hw is gated on client hw decode AND moved below H.265 — NVENC AV1
+            # bitstreams work in principle but large I-frames cause write-buffer stalls
+            # on constrained paths; H.265 hw is the safer universal default.
             ("h265", "hw", "hw"), ("h265", "hw", "sw"),
+            ("av1",  "hw", "hw"),
             ("h264", "hw", "hw"), ("h264", "hw", "sw"),
             ("h264", "sw", "hw"), ("h264", "sw", "sw"),
         ]

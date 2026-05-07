@@ -224,7 +224,10 @@ async def client_session(ws, cfg, bridge):
                         cur_buttons = 0
                         bridge.send_key_reset()
                     elif t == "caps":
-                        has_webcodecs = bool(ev.get("webcodecs", False))
+                        new_webcodecs = bool(ev.get("webcodecs", False))
+                        if not new_webcodecs and has_webcodecs:
+                            log.warning("client revoked WebCodecs (switching to JPEG): caps=%s", ev)
+                        has_webcodecs = new_webcodecs
                         client_codecs = ev.get("codecs", [])
                         client_matrix = ev.get("codecCaps")
                         explicit = bool(ev.get("explicit", False))
