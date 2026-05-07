@@ -189,30 +189,47 @@ def normalize_client_caps(client_caps):
 
 
 def select_codec(server_caps, client_caps, explicit=False):
-    # Codec quality is the outer priority: h265 must always beat vp9/h264 regardless
-    # of whether encode/decode is hw or sw. Within a codec, prefer hw over sw on
-    # both sides. The previous order (hw/sw outer, codec inner) caused VP9 with a
-    # hw client decoder to beat H265 with only a sw client decoder — wrong tradeoff.
-    #
-    # H.265 is preferred over AV1 in auto mode: hevc_nvenc produces more conformant
-    # bitstreams for WebCodecs than av1_nvenc (Chrome's AV1 WebCodecs decoder is
-    # pickier about bitstream details at low bitrates). AV1 is still reachable via
-    # explicit user selection.
-    codec_priority = ["h265", "av1", "vp9", "h264"]
-    group_priority = [("hw", "hw"), ("hw", "sw"), ("sw", "hw"), ("sw", "sw")]
-    for codec in codec_priority:
-        for s_kind, c_kind in group_priority:
-            # Auto-mode AV1 only when the SERVER has hardware AV1 (av1_nvenc/qsv/amf).
-            # libsvtav1's realtime preset-10 output is silently rejected by Chrome's
-            # WebCodecs AV1 decoder more often than it is accepted — the browser then
-            # signals webcodecs:false and the session falls to JPEG, even though h265
-            # would have worked. Hardware AV1 encoders produce far more conformant
-            # bitstreams. Users can still pick software AV1 manually via explicit selection.
-            if not explicit and codec == "av1" and s_kind == "sw":
-                continue
-            if (server_caps.get(codec, {}).get(s_kind)
-                    and client_caps.get(codec, {}).get(c_kind)):
-                return _CLIENT_CODEC_MAP[codec], s_kind, c_kind
+    """Select best codec given server encoder and client decoder capabilities.
+
+    Auto mode (explicit=False) — conservative, CPU-safe:
+      HW tier (best quality):
+        AV1  hw encode + hw client decode only. AV1 sw decode is 3-5× H.264 and
+             lags on pre-2020 hardware that lacks a dedicated AV1 decode block.
+        H.265 hw encode + any client decode. SW H.265 decode is ~1.5× H.264 and
+             most machines ≥2016 have hardware HEVC decode anyway.
+      Fallback tier (universal):
+        H.264 hw encode then sw encode + any decode.
+      Never in auto: sw H.265 encode (5-10× heavier than x264), sw AV1 encode,
+                     VP9 sw encode (comparable to H.264 sw but no hw VP9 encoder).
+
+    Explicit mode (explicit=True) — user picked a codec, honour it:
+      Full priority including sw H.265 / VP9 sw / H.264 sw.
+      AV1 sw encode excluded regardless: libsvtav1 bitstreams are silently rejected
+      by Chrome's WebCodecs AV1 decoder; sessions fall to JPEG with no clear error.
+    """
+    if explicit:
+        candidates = [
+            ("av1",  "hw", "hw"), ("av1",  "hw", "sw"),
+            ("h265", "hw", "hw"), ("h265", "hw", "sw"),
+            ("h265", "sw", "hw"), ("h265", "sw", "sw"),
+            # AV1 sw encode excluded (Chrome WebCodecs AV1 bitstream rejection)
+            ("vp9",  "sw", "hw"), ("vp9",  "sw", "sw"),
+            ("h264", "hw", "hw"), ("h264", "hw", "sw"),
+            ("h264", "sw", "hw"), ("h264", "sw", "sw"),
+        ]
+    else:
+        candidates = [
+            ("av1",  "hw", "hw"),           # AV1: hw/hw only — client hw decode gate
+            ("h265", "hw", "hw"), ("h265", "hw", "sw"),
+            ("h264", "hw", "hw"), ("h264", "hw", "sw"),
+            ("h264", "sw", "hw"), ("h264", "sw", "sw"),
+        ]
+
+    for codec, s_kind, c_kind in candidates:
+        if (server_caps.get(codec, {}).get(s_kind)
+                and client_caps.get(codec, {}).get(c_kind)):
+            return _CLIENT_CODEC_MAP[codec], s_kind, c_kind
+
     if server_caps.get("jpeg", {}).get("sw") and client_caps.get("jpeg", {}).get("sw", True):
         return CODEC_JPEG, "sw", "sw"
     return CODEC_JPEG, "sw", "sw"
