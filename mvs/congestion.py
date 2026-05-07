@@ -29,6 +29,7 @@ class AdaptiveController:
         # Congestion ceiling: bitrate at the moment the last backoff fired.
         # 0 = not yet measured — on_fresh probes slowly until first congestion event.
         self._ceil_bitrate = 0
+        self._conn_time = time.monotonic()  # suppress ceiling recording during initial keyframe burst
         self._last_slow = 0.0
         self._last_fast = 0.0
         self._drain_until = 0.0     # monotonic deadline: stop sending until this time
@@ -123,7 +124,12 @@ class AdaptiveController:
         if self.bitrate > self._min_br:
             # Save congestion point before reducing — this is the network ceiling (SSTHRESH).
             # On recovery, ramp fast back to here, probe slowly above.
-            self._ceil_bitrate = self.bitrate
+            # Skip recording the ceiling during the first 5s: initial-connect keyframe bursts
+            # always trigger a lag spike but don't reflect the steady-state link capacity.
+            # Without this gate, the first keyframe sets a low ceiling (e.g. 750k) and the
+            # frame_bytes probe guard then keeps the controller pinned there indefinitely.
+            if time.monotonic() - self._conn_time > 5.0:
+                self._ceil_bitrate = self.bitrate
             self.bitrate = max(self._min_br, int(self.bitrate * factor))
             self.jpeg_quality = max(10, int(self.jpeg_quality * factor))
             changed = True
@@ -337,13 +343,21 @@ class AdaptiveController:
                 if self.bitrate < target:
                     step = max(int(self.bitrate * 1.20), self.bitrate + 200_000)
                     self.bitrate = min(target, step)
-                elif frame_bytes > 1500:
+                else:
+                    # Above the congestion ceiling — only probe when the frame carried real data.
+                    # Near-zero static P-frames (idle desktop) don't test the link; probing on
+                    # them causes phantom ramps to 16+ Mbps followed by immediate congestion.
+                    # Threshold: max(500 bytes, half the average frame budget at current settings).
+                    # The 1500-byte floor was fine for VNC (byte-exact deltas) but traps H.264
+                    # at low bitrates where even content-bearing P-frames are < 1500 bytes.
+                    avg_frame = int(self.bitrate / max(1.0, self.fps) / 8)
+                    probe_min = max(500, avg_frame // 2)
+                    if frame_bytes <= probe_min:
+                        return  # near-zero frame: don't probe above last congestion ceiling
                     if self.bitrate < 20_000_000:
                         self.bitrate = min(self._max_br, int(self.bitrate * 1.10))
                     else:
                         self.bitrate = min(self._max_br, int(self.bitrate * 1.05))
-                else:
-                    return  # near-zero frame: don't probe above last congestion ceiling
                 self.jpeg_quality = min(95, self.jpeg_quality + 5)
                 _changed = True
             if _changed:
