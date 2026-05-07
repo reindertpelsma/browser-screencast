@@ -100,5 +100,32 @@ class CongestionPolicyTests(unittest.TestCase):
             congestion.time.monotonic = old_monotonic
 
 
+    def test_on_lag_ignored_below_throughput_floor(self):
+        """If actual wire throughput is below 300kbps the encoder/CPU is the bottleneck,
+        not the network.  on_lag() must be a no-op in this state so backoff doesn't
+        worsen a situation it can't fix (e.g. libx265 at 1fps on a CPU-limited QEMU VM)."""
+        fake = _FakeClock()
+        old_monotonic = congestion.time.monotonic
+        congestion.time.monotonic = fake.monotonic
+        try:
+            ctrl = AdaptiveController(SimpleNamespace(max_fps=60, initial_bitrate=1_200_000))
+            # Simulate 1fps at ~4 KB/frame — H.265 on a CPU-limited QEMU VM produces
+            # very small frames because static desktop content compresses well.
+            # 4 KB/frame × 1fps = 32kbps, well below the 300kbps floor.
+            # Window: 3 frames at t=1001,1002,1003 → 12KB over 2s → 48kbps.
+            for i in range(3):
+                fake.step(1.0)
+                ctrl.report_sent(4_000)  # 4 KB per frame → ~48kbps measured
+
+            br_before = ctrl.bitrate
+            # on_lag with severe write-buf backpressure must NOT fire when below floor
+            ctrl.on_lag(500, 2_000_000)  # age=500ms, wb=2MB — would normally be severe
+            br_after, _, _ = ctrl.bitrate, ctrl.fps, ctrl.jpeg_quality
+            self.assertEqual(ctrl.bitrate, br_before,
+                             "on_lag must not back off when wire throughput < 300kbps floor")
+        finally:
+            congestion.time.monotonic = old_monotonic
+
+
 if __name__ == "__main__":
     unittest.main()

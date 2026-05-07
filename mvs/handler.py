@@ -555,6 +555,7 @@ async def client_session(ws, cfg, bridge):
                                                      codec_s, is_kf_s, len(payload_s))
                                         await ws.send(hdr_s + payload_s)
                                         _last_sent_bytes = len(hdr_s) + len(payload_s)
+                                        ctrl.report_sent(_last_sent_bytes)
                                         _n_diag += 1
                                         log.debug("static heartbeat: %dkbps q=%d", br_s // 1000, quality)
                                 except Exception as e:
@@ -712,6 +713,7 @@ async def client_session(ws, cfg, bridge):
                 try:
                     await ws.send(hdr + payload)
                     _last_sent_bytes = len(hdr) + len(payload)
+                    ctrl.report_sent(_last_sent_bytes)
                 except Exception as e:
                     log.debug("send err: %s", e); break
 

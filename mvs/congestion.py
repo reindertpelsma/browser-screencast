@@ -38,6 +38,31 @@ class AdaptiveController:
         self._ping_smooth = 0.0     # EWA-smoothed video ping RTT (jitter suppression)
         self._ping_history = []     # last 4 smoothed samples for gradient computation
         self._metric_rtt = 0.0      # EWA of unloaded metric-channel RTT; 0 = not measured yet
+        # Rolling throughput tracker: (timestamp, bytes) ring for the last 3s.
+        # Used to gate on_lag() — congestion can only exist when actual wire
+        # throughput >= _min_br (300kbps).  Below that the encoder/CPU is the
+        # bottleneck, not the network; backoff would only make things worse.
+        self._sent_ring: list = []  # [(monotonic, bytes), ...]
+
+    def report_sent(self, nbytes: int) -> None:
+        """Record bytes written to the WebSocket. Called after every frame send.
+        Feeds the rolling throughput window used to gate on_lag()."""
+        now = time.monotonic()
+        self._sent_ring.append((now, nbytes))
+        # Keep only the last 3 seconds
+        cutoff = now - 3.0
+        while self._sent_ring and self._sent_ring[0][0] < cutoff:
+            self._sent_ring.pop(0)
+
+    def _rolling_bps(self) -> float:
+        """Actual wire throughput (bps) over the last 3 s. 0 if no data yet."""
+        if len(self._sent_ring) < 2:
+            return 0.0
+        elapsed = self._sent_ring[-1][0] - self._sent_ring[0][0]
+        if elapsed < 0.1:
+            return 0.0
+        total = sum(b for _, b in self._sent_ring)
+        return total * 8 / elapsed
 
     @property
     def draining(self):
@@ -168,6 +193,18 @@ class AdaptiveController:
         return max(16 * avg_frame, 64 * 1024, int(self.lag_budget_ms() * self.bitrate / 8000))
 
     def on_lag(self, age_ms, write_buf=0):
+        # Throughput guard: if actual wire throughput is below the bitrate floor
+        # the encoder/CPU is the bottleneck, not the network.  Backoff in this
+        # state would lower an already-floored bitrate target with no effect on
+        # the real constraint (encoder speed), and prevents recovery when the
+        # encoder catches up.  Only skip when we have enough history (>= 1s).
+        if len(self._sent_ring) >= 2:
+            window = self._sent_ring[-1][0] - self._sent_ring[0][0]
+            if window >= 1.0 and self._rolling_bps() < self._min_br * 0.9:
+                log.debug("on_lag skipped: throughput %.0f bps < floor %d bps",
+                          self._rolling_bps(), self._min_br)
+                return
+
         budget = self.lag_budget_ms()
         # write_buf == 0: the local TCP socket was empty when the frame was queued —
         # no backpressure from the link.  In this state age_ms reflects frame

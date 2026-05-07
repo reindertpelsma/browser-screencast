@@ -70,8 +70,16 @@ class EncoderPipeline:
                 # unlabelled IDR as a P-frame, corrupting DPB until next forced IDR).
                 # tune=zerolatency omitted: it disables cu-tree rate control, causing
                 # uneven post-motion bit distribution and visible softness after pans.
-                ("libx265", {"preset": "fast",
-                             "x265-params": "bframes=0:rc-lookahead=0:aq-mode=1:min-keyint=1:scenecut=0:no-sao=1:no-strong-intra-smoothing=1:level-idc=4.1:weightp=0"}),
+                # ultrafast preset: x265 "fast" is 5-10× heavier than x264 "fast";
+                # on CPU-only systems it produces ~1fps at 1280×720. ultrafast gives
+                # adequate quality for screen capture (mostly static, sharp UI edges)
+                # while being fast enough for real-time use.
+                # wpp=0:pmode=0:pme=0: disable all intra-frame parallelism. x265 spawns
+                # per-frame worker threads by default; on QEMU / low-vCPU hosts they
+                # thrash against each other and the Python thread pool, cutting throughput
+                # further. Single-threaded is faster end-to-end for short frames.
+                ("libx265", {"preset": "ultrafast",
+                             "x265-params": "bframes=0:rc-lookahead=0:aq-mode=1:min-keyint=1:scenecut=0:no-sao=1:no-strong-intra-smoothing=1:level-idc=4.1:weightp=0:wpp=0:pmode=0:pme=0"}),
             ],
             CODEC_AV1: [
                 ("av1_nvenc", {"preset": "p4", "tune": "ull", "rc": "vbr"}),
