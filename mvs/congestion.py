@@ -155,9 +155,17 @@ class AdaptiveController:
     def lag_wb_budget(self):
         """Write-buffer byte equivalent of lag_budget_ms at current bitrate.
         Scales with lag_budget_ms so a higher lag budget also tolerates a larger
-        TCP send buffer before triggering backoff. Floor is 2 average frame sizes."""
+        TCP send buffer before triggering backoff.
+
+        Floor is 8× average frame size. H.264 VBR scene-change frames routinely
+        hit 8-16× the average P-frame size (window open/close, rapid motion).
+        The old 2× floor caused these normal VBR bursts to register as severe
+        congestion, immediately halving the bitrate and ratcheting the ceiling down
+        every time the screen changed — quality got WORSE with more motion.
+        8× tolerates a typical burst without backoff; the RTT-budget term still
+        fires when the buffer stays elevated across multiple frames (real congestion)."""
         avg_frame = int(self.bitrate / max(1.0, self.fps) / 8)  # bytes per average frame
-        return max(2 * avg_frame, 4 * 1024, int(self.lag_budget_ms() * self.bitrate / 8000))
+        return max(8 * avg_frame, 16 * 1024, int(self.lag_budget_ms() * self.bitrate / 8000))
 
     def on_lag(self, age_ms, write_buf=0):
         budget = self.lag_budget_ms()
@@ -372,7 +380,11 @@ class AdaptiveController:
             self.fps = fps_ceil
             if self._ceil_bitrate > 0 and self._ceil_bitrate > self.bitrate:
                 target = int(self._ceil_bitrate * 0.90)
-                step_ceil = max(self.bitrate * 2, self.bitrate + 500_000)
+                # Conservative step: at most 50% jump toward ceiling per active event.
+                # The old 2× step caused a large first frame that exceeded the wb budget
+                # and immediately triggered backoff, ratcheting the ceiling lower with
+                # every burst of screen activity.
+                step_ceil = max(int(self.bitrate * 1.5), self.bitrate + 300_000)
                 self.bitrate = max(self._min_br, min(target, step_ceil))
                 self.jpeg_quality = min(95, self.jpeg_quality + 20)
                 # Only debounce on_fresh when we actually jump bitrate — setting
