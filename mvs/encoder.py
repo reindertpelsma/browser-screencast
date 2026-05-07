@@ -161,20 +161,23 @@ class EncoderPipeline:
 
     def encode(self, rgb, capture_ms, jpeg_quality=65):
         """Returns (payload, is_keyframe, codec_byte) or (None, False, _) on skip."""
-        if self._cc is None:
+        # Snapshot _cc into a local so a concurrent close() (from _upgrade_encoder racing
+        # with run_in_executor) cannot turn it None between the null check and encode().
+        cc = self._cc
+        if cc is None:
             return _encode_jpeg(self._to_rgb(rgb), jpeg_quality), True, CODEC_JPEG
         try:
             fmt = "bgra" if (rgb.ndim == 3 and rgb.shape[2] == 4) else "rgb24"
             frame = _av.VideoFrame.from_ndarray(rgb, format=fmt)
             # Downscale to encoder dimensions if source is larger (libswscale Lanczos).
-            if frame.width != self._cc.width or frame.height != self._cc.height:
-                frame = frame.reformat(width=self._cc.width, height=self._cc.height, format=fmt,
+            if frame.width != cc.width or frame.height != cc.height:
+                frame = frame.reformat(width=cc.width, height=cc.height, format=fmt,
                                        interpolation="LANCZOS")
             frame = frame.reformat(format="yuv420p")
             pts = max(self._last_pts + 1, capture_ms)
             frame.pts = pts
             self._last_pts = pts
-            pkts = list(self._cc.encode(frame))
+            pkts = list(cc.encode(frame))
             if not pkts:
                 return None, False, self.actual_codec
             pkt = pkts[0]
@@ -199,14 +202,15 @@ class EncoderPipeline:
         while the actual IDR is still in the pipeline.  Returning None here signals
         the caller to retry — the handler re-sets _need_keyframe and tries again.
         """
-        if self._cc is None:
+        cc = self._cc  # snapshot — same close() race guard as encode()
+        if cc is None:
             return _encode_jpeg(self._to_rgb(rgb), quality), True, CODEC_JPEG
         pkts = []
         try:
             fmt = "bgra" if (rgb.ndim == 3 and rgb.shape[2] == 4) else "rgb24"
             frame = _av.VideoFrame.from_ndarray(rgb, format=fmt)
-            if frame.width != self._cc.width or frame.height != self._cc.height:
-                frame = frame.reformat(width=self._cc.width, height=self._cc.height, format=fmt,
+            if frame.width != cc.width or frame.height != cc.height:
+                frame = frame.reformat(width=cc.width, height=cc.height, format=fmt,
                                        interpolation="LANCZOS")
             frame = frame.reformat(format="yuv420p")
             pts = max(self._last_pts + 1, capture_ms)
@@ -218,7 +222,7 @@ class EncoderPipeline:
             # key_frame alone → X264_TYPE_AUTO (P-frame, no forced keyframe).
             frame.pict_type = 1
             frame.key_frame = True
-            pkts = list(self._cc.encode(frame))
+            pkts = list(cc.encode(frame))
             self._last_pts = pts
         except Exception as e:
             log.debug("encode_keyframe err: %s", e)
