@@ -28,11 +28,16 @@ _active_clients: int = 0
 def _load_frontend_html():
     import sys as _sys
     here = Path(__file__).resolve()
-    # 1. Dev layout: ../frontend/index.html relative to mvs/.
+    # 1. PyInstaller onefile bundle: sys._MEIPASS is the temp extraction dir.
+    if getattr(_sys, 'frozen', False) and hasattr(_sys, '_MEIPASS'):
+        cand = Path(_sys._MEIPASS) / "frontend" / "index.html"
+        if cand.is_file():
+            return cand.read_bytes()
+    # 2. Dev layout: ../frontend/index.html relative to mvs/.
     cand = here.parent.parent / "frontend" / "index.html"
     if cand.is_file():
         return cand.read_bytes()
-    # 2. py2app bundle: walk up looking for Contents/Resources/frontend/.
+    # 3. py2app bundle: walk up looking for Contents/Resources/frontend/.
     p = here
     for _ in range(8):
         if (p / "Contents" / "Resources" / "frontend" / "index.html").is_file():
@@ -40,7 +45,7 @@ def _load_frontend_html():
         if p.parent == p:
             break
         p = p.parent
-    # 3. Last-ditch: same dir as sys.executable (e.g. .app/Contents/MacOS/) →
+    # 4. Last-ditch: same dir as sys.executable (e.g. .app/Contents/MacOS/) →
     #    sibling Resources/frontend/index.html.
     exe_dir = Path(_sys.executable).resolve().parent
     cand2 = exe_dir.parent / "Resources" / "frontend" / "index.html"

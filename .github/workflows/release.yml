@@ -59,6 +59,7 @@ jobs:
             --hidden-import Xlib.display \
             --hidden-import Xlib.ext.xtest \
             --collect-all av \
+            --add-data "frontend:frontend" \
             server.py
           ls -lh dist/
 
@@ -70,6 +71,7 @@ jobs:
             --name browser-screencast `
             --hidden-import av `
             --collect-all av `
+            --add-data "frontend;frontend" `
             server.py
           dir dist\
 
