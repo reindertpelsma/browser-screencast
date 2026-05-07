@@ -368,7 +368,7 @@ async def client_session(ws, cfg, bridge):
                     await ws.send(json.dumps({"t": "clipboard", "text": bridge.server_clipboard, "seq": sc}))
                 except Exception:
                     pass
-        nonlocal _enc_target_w, _enc_target_h, _reinit_deadline, _need_keyframe, _last_lag_received, _last_sent_bytes
+        nonlocal _enc_target_w, _enc_target_h, _reinit_deadline, _need_keyframe, _last_lag_received
         last_encoder_codec = encoder.actual_codec
         _bw_sent = []       # list of (monotonic_time, bytes) for rolling 1s bandwidth measurement
         _t_diag = time.monotonic(); _n_diag = 0; _n_drop = 0; _n_nosend = 0
