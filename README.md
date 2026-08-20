@@ -110,6 +110,21 @@ The UI has two presets:
 | mss | `--capture mss` | Fallback if x11grab unavailable |
 | VNC pass-through | `--capture vnc` | Point at an existing VNC server |
 
+## Testing
+
+```bash
+pytest --ignore=tests/test_2mbps.py     # unit + protocol suite
+```
+
+Two files are not ordinary pytest tests and are excluded or skipped on purpose:
+
+- `tests/test_encoder_roundtrip.py` is an **encode → decode → PSNR harness**
+  with its own runner. Run it as a script, optionally per codec:
+  `python3 tests/test_encoder_roundtrip.py --codec h265`. It needs a GPU to
+  exercise the NVENC paths; without one it covers the software encoders.
+- `tests/test_2mbps.py` is a **throughput script against a live server**, not a
+  unit test — it connects to a running instance rather than starting one.
+
 ## Security model
 
 The server binds to `127.0.0.1` by default. Reach it through SSH port forwarding:
