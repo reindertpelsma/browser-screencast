@@ -367,6 +367,28 @@ TESTS = [
 CODECS = [CODEC_H264, CODEC_H265, CODEC_VP9]
 
 
+# ---------------------------------------------------------------------------
+# pytest interop
+#
+# The test_* functions above are a CUSTOM harness: they take (codec_id,
+# verbose) and RETURN "PASS"/"FAIL" strings rather than asserting. pytest
+# collects them by name, cannot supply `codec_id`/`verbose` as fixtures, and
+# reports 5 errors that look like failures but mean nothing -- the functions
+# never ran. Mark them uncollectable so the pytest run reflects reality; they
+# are driven by main() below:
+#
+#     python3 tests/test_encoder_roundtrip.py [--codec h264|h265|vp9]
+#
+# They are deliberately NOT wired into pytest as parametrized tests: the
+# decode side muxes through av.open(BytesIO), which SEGFAULTS on PyAV 11 for
+# H.264 (reproduced with both libx264 and h264_nvenc, so it is a PyAV bug and
+# not an encoder one). Collecting them would crash the whole pytest process
+# rather than fail a test.
+for _name, _fn in TESTS:
+    _fn.__test__ = False
+del _name, _fn
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("-v", "--verbose", action="store_true")
