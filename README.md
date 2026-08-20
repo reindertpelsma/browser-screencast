@@ -113,17 +113,18 @@ The UI has two presets:
 ## Testing
 
 ```bash
-pytest --ignore=tests/test_2mbps.py     # unit + protocol suite
+pytest              # unit + protocol suite
 ```
 
-Two files are not ordinary pytest tests and are excluded or skipped on purpose:
+Two files under `tests/` are not ordinary unit tests and are run directly:
 
-- `tests/test_encoder_roundtrip.py` is an **encode → decode → PSNR harness**
-  with its own runner. Run it as a script, optionally per codec:
-  `python3 tests/test_encoder_roundtrip.py --codec h265`. It needs a GPU to
-  exercise the NVENC paths; without one it covers the software encoders.
-- `tests/test_2mbps.py` is a **throughput script against a live server**, not a
-  unit test — it connects to a running instance rather than starting one.
+- `tests/test_encoder_roundtrip.py` — an **encode → decode → PSNR harness** with
+  its own runner: `python3 tests/test_encoder_roundtrip.py --codec h265`. It
+  needs a GPU to exercise the NVENC paths; without one it covers the software
+  encoders.
+- `tests/test_2mbps.py` — a **throughput script against a live server**:
+  `python3 tests/test_2mbps.py <port> <token>`. It connects to a running
+  instance rather than starting one.
 
 ## Security model
 
