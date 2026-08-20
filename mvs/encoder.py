@@ -35,7 +35,16 @@ class EncoderPipeline:
             CODEC_H264: [
                 # bf=0: no B-frames. level=4.2 matches avc1.64002a codec string.
                 ("h264_nvenc", {"preset": "p4", "tune": "ull", "rc": "vbr",
-                                "bf": "0", "level": "4.2"}),
+                                "bf": "0", "level": "4.2",
+                                # forced-idr: NVENC ignores pict_type=I as an IDR
+                                # request and honours gop_size instead, so without
+                                # this encode_keyframe() gets a P-frame back,
+                                # discards it as "IDR still in the pipeline" and
+                                # retries forever -- zero frames ever sent.
+                                # NOTE the HYPHEN: "forced_idr" is not the AVOption
+                                # name and is silently ignored (measured: identical
+                                # 1/12 keyframes with and without it).
+                                "forced-idr": "1"}),
                 ("h264_qsv", {"preset": "veryfast", "look_ahead": "0",
                               "low_power": "0"}),
                 ("h264_amf", {"usage": "ultralowlatency", "quality": "speed",
@@ -57,7 +66,12 @@ class EncoderPipeline:
                 # nvenc may auto-pick a higher one and trigger the same DPB-undersize
                 # bug as libx265 did.
                 ("hevc_nvenc", {"preset": "p4", "tune": "ull", "rc": "vbr",
-                                "bf": "0", "level": "4.1"}),
+                                "bf": "0", "level": "4.1",
+                                # See the h264_nvenc note: hyphenated, and required
+                                # or encode_keyframe() never returns a packet.
+                                # Measured on an RTX 3060: 1/12 keyframes without,
+                                # 10/10 with.
+                                "forced-idr": "1"}),
                 ("hevc_qsv", {"preset": "veryfast", "look_ahead": "0",
                               "low_power": "0"}),
                 ("hevc_amf", {"usage": "ultralowlatency", "quality": "speed",
@@ -82,7 +96,11 @@ class EncoderPipeline:
                              "x265-params": "bframes=0:rc-lookahead=0:aq-mode=1:min-keyint=1:scenecut=0:no-sao=1:no-strong-intra-smoothing=1:level-idc=4.1:weightp=0:wpp=0:pmode=0:pme=0"}),
             ],
             CODEC_AV1: [
-                ("av1_nvenc", {"preset": "p4", "tune": "ull", "rc": "vbr"}),
+                ("av1_nvenc", {"preset": "p4", "tune": "ull", "rc": "vbr",
+                               # Same IDR requirement as the other NVENC entries.
+                               # Untested here -- Ampere has no AV1 encode block,
+                               # so this path could not be exercised on the test GPU.
+                               "forced-idr": "1"}),
                 ("av1_qsv", {"preset": "veryfast"}),
                 ("av1_amf", {"usage": "ultralowlatency", "quality": "speed"}),
                 # enable-tf=0: temporal filtering produces alt-ref-style references
@@ -126,11 +144,31 @@ class EncoderPipeline:
                 # produces output immediately instead of waiting for 20 captures.
                 # Other pure-output software encoders (libx264/libx265/libvpx-vp9)
                 # output on the first frame and don't need priming.
-                if name not in _SW_ENCODERS:
+                # NVENC with bf=0 + tune=ull has no reorder delay, and its warmup
+                # returns 0 packets -- the black dummy stays IN the pipeline and is
+                # emitted as the first real packet, so every decoded frame is offset
+                # by one against its source (measured: PSNR 7.8 dB on pkt 0).
+                # Skip the warmup for NVENC; it is priming that costs correctness.
+                if name.endswith("_nvenc"):
+                    self._last_pts = 0
+                elif name not in _SW_ENCODERS:
                     dummy = _av.VideoFrame(cc.width, cc.height, "yuv420p")
                     dummy.pts = 0
                     dummy.pict_type = 1
-                    dummy.key_frame = True
+                    # PyAV exposes VideoFrame.key_frame read-only (confirmed on
+                    # 8.1.0 and on >=11 -- this is not a new-version regression).
+                    # Assigning it raises AttributeError, which the except below
+                    # swallows as "codec failed", so EVERY hardware candidate
+                    # (nvenc/qsv/amf) was silently rejected and the chain fell
+                    # through to libx264/libx265 -- which skip this branch via
+                    # _SW_ENCODERS and so probe fine. Measured on an RTX 3060:
+                    # without this, hevc_nvenc and h264_nvenc are both rejected;
+                    # with it, both are selected. pict_type=I already marks the
+                    # warmup frame as an IDR, so nothing is lost by dropping it.
+                    try:
+                        dummy.key_frame = True
+                    except AttributeError:
+                        pass
                     list(cc.encode(dummy))
                     self._last_pts = 0
                 elif name == "libsvtav1":
@@ -221,7 +259,19 @@ class EncoderPipeline:
             #   key_frame = True               → selects IDR over I-slice within that branch
             # key_frame alone → X264_TYPE_AUTO (P-frame, no forced keyframe).
             frame.pict_type = 1
-            frame.key_frame = True
+            # PyAV exposes key_frame read-only (8.1.0 and >=11 alike), so this
+            # raises AttributeError -- which the except below swallowed, leaving
+            # pkts empty. encode_keyframe() then returned None, the handler
+            # re-armed _need_keyframe, and every subsequent frame took the same
+            # path: a permanent retry loop in which NOTHING is ever sent. That
+            # is the "capture runs at 60fps but the client sees a static
+            # screen" symptom -- DIAG showed cap=60.0fps, sent=0.0fps,
+            # nosend=300/5s. IDR is instead forced by pict_type=I plus the
+            # encoder's forced-idr option (see the candidate table above).
+            try:
+                frame.key_frame = True
+            except AttributeError:
+                pass
             pkts = list(cc.encode(frame))
             self._last_pts = pts
         except Exception as e:
