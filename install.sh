@@ -101,10 +101,26 @@ if [[ "$FORCE_FROM_SOURCE" -eq 0 && "$SKIP_DEPS" -eq 0 ]]; then
             | head -1)"
         if [[ -n "$ASSET_URL" ]]; then
             green "  Found release ${RELEASE_TAG} → ${ASSET}"
-            mkdir -p "$BIN_DIR" "$CONFIG_DIR"
-            if curl -fsSL "$ASSET_URL" -o "$BIN_DIR/browser-screencast" 2>/dev/null; then
-                chmod +x "$BIN_DIR/browser-screencast"
-                green "  Binary installed: $BIN_DIR/browser-screencast"
+            mkdir -p "$BIN_DIR" "$CONFIG_DIR" "$INSTALL_DIR"
+            # The real binary lives in $INSTALL_DIR, NOT at
+            # $BIN_DIR/browser-screencast: that path belongs to the token
+            # wrapper written below.  Putting the binary there meant the
+            # wrapper overwrote it and then exec'd itself forever.
+            REAL_BIN="$INSTALL_DIR/browser-screencast"
+            # BROWSER_SCREENCAST_HOME and _BIN are set independently, so they
+            # can name the same directory.  Never let the binary and its
+            # wrapper collide, whatever the caller configured.
+            if [[ "$REAL_BIN" -ef "$BIN_DIR/browser-screencast" \
+               || "$REAL_BIN" == "$BIN_DIR/browser-screencast" ]]; then
+                REAL_BIN="$INSTALL_DIR/browser-screencast.bin"
+            fi
+            TMP_DL="$(mktemp)"
+            # Download to a temp file first so a failed or partial transfer
+            # cannot leave a truncated binary at the installed path.
+            if curl -fsSL "$ASSET_URL" -o "$TMP_DL" 2>/dev/null; then
+                chmod +x "$TMP_DL"
+                mv -f "$TMP_DL" "$REAL_BIN"
+                green "  Binary installed: $REAL_BIN"
 
                 # Token
                 TOKEN_FILE="$CONFIG_DIR/token"
@@ -121,9 +137,9 @@ if [[ "$FORCE_FROM_SOURCE" -eq 0 && "$SKIP_DEPS" -eq 0 ]]; then
                 TMP_BIN="$(mktemp)"
                 cat > "$TMP_BIN" <<WRAPPER
 #!/usr/bin/env sh
-exec "$BIN_DIR/browser-screencast" --password "$TOKEN" "\$@"
+exec "$REAL_BIN" --password "$TOKEN" "\$@"
 WRAPPER
-                mv "$TMP_BIN" "$BIN_DIR/browser-screencast"
+                mv -f "$TMP_BIN" "$BIN_DIR/browser-screencast"
                 chmod +x "$BIN_DIR/browser-screencast"
 
                 echo
@@ -141,6 +157,7 @@ WRAPPER
                 fi
                 exit 0
             else
+                rm -f "$TMP_DL"
                 yellow "  Binary download failed — falling back to Python source install."
             fi
         else

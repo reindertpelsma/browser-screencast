@@ -25,10 +25,14 @@ except ImportError:
     from cpu_sampler import CpuSampler
 
 HOST        = "127.0.0.1"
-PORT        = int(sys.argv[1])   if len(sys.argv) > 1 else 6081
-TOKEN       = sys.argv[2]        if len(sys.argv) > 2 else ""
-MIN_FPS     = float(sys.argv[3]) if len(sys.argv) > 3 else 2.0
-MIN_MBPS    = float(sys.argv[4]) if len(sys.argv) > 4 else 0.0   # 0 = no check
+# Only consume argv when run directly. pytest imports this module during
+# collection, and its own flags (-q, --ignore=...) would be parsed as our
+# arguments -- int("-q") raises, which aborts collection for the WHOLE repo.
+_ARGV = sys.argv[1:] if __name__ == "__main__" else []
+PORT        = int(_ARGV[0])   if len(_ARGV) > 0 else 6081
+TOKEN       = _ARGV[1]        if len(_ARGV) > 1 else ""
+MIN_FPS     = float(_ARGV[2]) if len(_ARGV) > 2 else 2.0
+MIN_MBPS    = float(_ARGV[3]) if len(_ARGV) > 3 else 0.0   # 0 = no check
 RATE_BPS    = int(os.environ.get("RATE_BPS", "2000000"))   # simulated downstream
 DURATION    = float(os.environ.get("DURATION", "90.0"))     # total test duration (seconds) — bumped to 90s to give
                           # the controller a clean 50s steady-state window after
@@ -225,4 +229,8 @@ async def main():
         print(f"\nPASS")
 
 
-asyncio.run(main())
+# Guarded: this file is a throughput script against a LIVE server, not a unit
+# test. Unguarded, importing it ran the whole thing at collection time and then
+# sys.exit(1), which pytest reports as INTERNALERROR and no tests run at all.
+if __name__ == "__main__":
+    asyncio.run(main())
