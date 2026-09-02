@@ -4,7 +4,7 @@ import logging
 import numpy as np
 
 from mvs.codec import (CODEC_JPEG, CODEC_H264, CODEC_H265, CODEC_AV1, CODEC_VP9,
-                        _AV_OK, _av, _encode_jpeg)
+                        _AV_OK, _av, _encode_jpeg, capture_libav_logs)
 
 log = logging.getLogger("browser_screencast")
 
@@ -12,6 +12,75 @@ log = logging.getLogger("browser_screencast")
 _SW_ENCODERS = frozenset({
     "libx264", "libx265", "libsvtav1", "libaom-av1", "libvpx-vp9",
 })
+
+# Suffixes of encoders that run on a dedicated hardware block.
+_HW_ENCODER_SUFFIXES = ("_nvenc", "_qsv", "_amf", "_vaapi", "_videotoolbox",
+                        "_mediacodec")
+
+# Hardware encoders already reported as unavailable — the reason is logged once
+# per process, not on every client connect and every resolution change.
+_hw_failure_reported = set()
+
+
+def _is_hw_encoder(name: str) -> bool:
+    return name.endswith(_HW_ENCODER_SUFFIXES)
+
+
+def _open_codec(name, opts, width, height, bitrate):
+    """Create and open one encoder, returning (codec_context, libav_log_lines).
+
+    The open happens inside an av.logging.Capture so that a failure carries the
+    reason FFmpeg printed rather than only PyAV's generic
+    `avcodec_open2("hevc_nvenc", {})`. Raises the original exception with the
+    captured lines attached as `.libav_logs`.
+    """
+    with capture_libav_logs() as logs:
+        try:
+            cc = _av.CodecContext.create(name, "w")
+            cc.width = width & ~1
+            cc.height = height & ~1
+            cc.pix_fmt = "yuv420p"
+            cc.bit_rate = bitrate
+            cc.time_base = fractions.Fraction(1, 1000)
+            # Declare 60fps so encoders (SVT-AV1, x265) don't derive 1000fps
+            # from time_base=1/1000, which causes level/profile violations.
+            cc.framerate = fractions.Fraction(60, 1)
+            # Large GOP: one I-frame per 5 seconds at max fps. Static screens
+            # produce near-zero P-frames; a short GOP would flood with large I-frames.
+            cc.gop_size = 99999
+            cc.options = opts
+            cc.open()
+        except Exception as e:
+            e.libav_logs = list(logs or [])
+            raise
+    return cc, list(logs or [])
+
+
+def _failure_detail(exc):
+    lines = [m.strip() for _lv, _cp, m in getattr(exc, "libav_logs", []) if m.strip()]
+    return "; ".join(lines) or str(exc)
+
+
+def _report_hw_fallback(chosen, hw_failures):
+    """Make a hardware->software downgrade loud, once, with the real reason.
+
+    Landing on a software encoder after attempting hardware is a several-fold
+    per-frame cost increase — measured on the live deployment's RTX 3060 host at
+    1920x1080, libx264 goes from 26ms/frame at a 1Mbps target to 96ms at 16Mbps,
+    i.e. a 10fps ceiling. It used to be entirely invisible: every candidate
+    failure went to log.debug, so the log showed `codec negotiation: h265
+    server=hw` followed by `Encoder: libx265` with nothing connecting the two.
+    """
+    if not hw_failures or (chosen is not None and _is_hw_encoder(chosen)):
+        return
+    for hw_name, detail in hw_failures:
+        if hw_name in _hw_failure_reported:
+            continue
+        _hw_failure_reported.add(hw_name)
+        log.warning("Hardware encoder %s unavailable: %s", hw_name, detail)
+    log.warning("HARDWARE ENCODING UNAVAILABLE — using %s. Expect several times the "
+                "per-frame encode cost and a correspondingly lower fps ceiling.",
+                chosen or "JPEG")
 
 
 # ---------------------------------------------------------------------------
@@ -120,22 +189,10 @@ class EncoderPipeline:
                                 "row-mt": "1", "lag-in-frames": "0"}),
             ],
         }
+        hw_failures = []
         for name, opts in candidates.get(self.target_codec, []):
             try:
-                cc = _av.CodecContext.create(name, "w")
-                cc.width = width & ~1
-                cc.height = height & ~1
-                cc.pix_fmt = "yuv420p"
-                cc.bit_rate = bitrate
-                cc.time_base = fractions.Fraction(1, 1000)
-                # Declare 60fps so encoders (SVT-AV1, x265) don't derive 1000fps
-                # from time_base=1/1000, which causes level/profile violations.
-                cc.framerate = fractions.Fraction(60, 1)
-                # Large GOP: one I-frame per 5 seconds at max fps. Static screens
-                # produce near-zero P-frames; a short GOP would flood with large I-frames.
-                cc.gop_size = 99999
-                cc.options = opts
-                cc.open()
+                cc, _ = _open_codec(name, opts, width, height, bitrate)
                 # Hardware encoders buffer the first frame; encode a black IDR warmup
                 # to prime the pipeline so the first real frame is not delayed.
                 # libsvtav1 forces a 20-frame lookahead regardless of options (preset
@@ -179,10 +236,17 @@ class EncoderPipeline:
                     self._last_pts = 24
                 self._cc = cc
                 self.actual_codec = self.target_codec
-                log.info("Encoder: %s %dx%d @%dkbps", name, cc.width, cc.height, bitrate//1000)
+                log.info("Encoder: %s (%s) %dx%d @%dkbps", name,
+                         "hardware" if _is_hw_encoder(name) else "software",
+                         cc.width, cc.height, bitrate // 1000)
+                _report_hw_fallback(name, hw_failures)
                 return
             except Exception as e:
-                log.debug("Codec %s failed: %s", name, e)
+                detail = _failure_detail(e)
+                log.debug("Codec %s failed: %s", name, detail)
+                if _is_hw_encoder(name):
+                    hw_failures.append((name, detail))
+        _report_hw_fallback(None, hw_failures)
         log.warning("No video codec available — JPEG fallback")
 
     def set_bitrate(self, bitrate):

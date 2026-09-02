@@ -66,6 +66,84 @@ class CodecProbeTests(unittest.TestCase):
         self.assertTrue(caps["jpeg"]["sw"])
 
 
+    def test_system_ffmpeg_listing_alone_cannot_claim_hardware(self):
+        """`ffmpeg -encoders` describes the SYSTEM ffmpeg CLI, not the FFmpeg PyAV
+        encodes with, and a device node only proves a device exists. Neither may
+        stand in for a real open.
+
+        This is the live-deployment failure: the host listed hevc_nvenc and had an
+        NVIDIA device node, so h265 hw read True; NVENC could not actually
+        initialise (cuCtxCreate -> CUDA_ERROR_OUT_OF_MEMORY, BAR1 exhausted), the
+        encoder cascade fell through to libx265, and the server ran software HEVC
+        — which auto mode is explicitly written never to choose."""
+        codec._av = _FakeAv()             # opens libx264/h264 only; no nvenc
+        codec._AV_OK = True
+        codec.ffmpeg_encoders_text = lambda: (
+            "V....D hevc_nvenc  NVIDIA NVENC hevc encoder\n"
+            "V....D h264_nvenc  NVIDIA NVENC H.264 encoder\n")
+        codec._has_hw_encoder_device = lambda names: True
+
+        caps = codec.probe_server_codecs()
+
+        self.assertFalse(caps["h265"]["hw"], "claimed hw H.265 without opening it")
+        self.assertFalse(caps["h264"]["hw"], "claimed hw H.264 without opening it")
+
+    def test_hardware_is_reported_when_it_actually_opens(self):
+        class _NvencAv:
+            class CodecContext:
+                @staticmethod
+                def create(name, mode):
+                    if name in {"hevc_nvenc", "libx264", "h264"}:
+                        return _FakeOpenableContext()
+                    raise RuntimeError(name)
+
+        codec._av = _NvencAv()
+        codec._AV_OK = True
+        codec.ffmpeg_encoders_text = lambda: ""
+        codec._has_hw_encoder_device = lambda names: True
+
+        caps = codec.probe_server_codecs()
+
+        self.assertTrue(caps["h265"]["hw"])
+        self.assertFalse(caps["av1"]["hw"])
+
+    def test_no_hardware_device_means_no_hardware_capability(self):
+        codec._av = _FakeAv()
+        codec._AV_OK = True
+        codec.ffmpeg_encoders_text = lambda: "V....D hevc_nvenc\n"
+        codec._has_hw_encoder_device = lambda names: False
+
+        self.assertFalse(codec.probe_server_codecs()["h265"]["hw"])
+
+
+class HardwareFallbackVisibilityTests(unittest.TestCase):
+    """A hardware->software downgrade is a large per-frame cost increase; it must
+    not be discoverable only by reading the source.
+
+    Measured on the live deployment's host (RTX 3060, 11 cores, 1920x1080):
+    libx264 costs 26ms/frame at a 1Mbps target and 96ms at 16Mbps — a 10fps
+    ceiling. Before this, every candidate failure went to log.debug, so the log
+    read `codec negotiation: h265 server=hw` then `Encoder: libx265` with nothing
+    linking the two."""
+
+    @classmethod
+    def setUpClass(cls):
+        from pathlib import Path
+        cls.source = (Path(__file__).resolve().parents[1] / "mvs" / "encoder.py").read_text()
+
+    def test_hardware_open_failures_are_warned_not_debugged(self):
+        self.assertIn("log.warning(\"Hardware encoder %s unavailable: %s\"", self.source)
+
+    def test_selected_encoder_records_hardware_or_software(self):
+        self.assertIn('"hardware" if _is_hw_encoder(name) else "software"', self.source)
+
+    def test_failure_reason_comes_from_captured_libav_logs(self):
+        # PyAV's own exception is only `avcodec_open2("hevc_nvenc", {})`; the
+        # reason FFmpeg printed has to be captured or it is lost.
+        self.assertIn("capture_libav_logs", self.source)
+        self.assertIn("libav_logs", self.source)
+
+
 class SelectCodecPolicyTests(unittest.TestCase):
     """Policy invariants for auto-mode and explicit-mode codec selection."""
 
