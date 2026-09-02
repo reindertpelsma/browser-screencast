@@ -47,6 +47,7 @@ jobs:
         if: matrix.os == 'linux'
         run: |
           pytest tests/test_congestion_policy.py \
+                 tests/test_bitrate_ramp.py \
                  tests/test_handler_policy.py \
                  tests/test_wire_header.py \
                  tests/test_frontend_lag_clock.py \
@@ -62,6 +63,7 @@ jobs:
         if: startsWith(matrix.os, 'windows')
         run: |
           pytest tests/test_congestion_policy.py `
+                 tests/test_bitrate_ramp.py `
                  tests/test_handler_policy.py `
                  tests/test_wire_header.py `
                  tests/test_frontend_lag_clock.py `

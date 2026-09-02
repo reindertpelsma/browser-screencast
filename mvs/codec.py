@@ -15,11 +15,53 @@ log = logging.getLogger("browser_screencast")
 # ---------------------------------------------------------------------------
 try:
     import av as _av
+    import av.logging as _av_logging
     _AV_OK = True
 except ImportError:
     _av = None
+    _av_logging = None
     _AV_OK = False
     log.warning("PyAV not installed (pip install av) — JPEG-only mode")
+
+
+class _NullCapture(list):
+    """Stand-in for av.logging.Capture on builds that lack it."""
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def capture_libav_logs():
+    """Context manager collecting the libav messages emitted inside it."""
+    if not _AV_OK:
+        return _NullCapture()
+    try:
+        return _av_logging.Capture(local=True)
+    except Exception:
+        return _NullCapture()
+
+
+# PyAV silences FFmpeg's own diagnostics by default, which is why a hardware
+# encoder that refuses to open left behind nothing but a generic
+# `avcodec_open2("hevc_nvenc", {})` — a large performance cliff with no reason
+# recorded anywhere. Turning ERROR-level libav messages on costs nothing in
+# normal operation (libav is silent unless something breaks) and turns that into
+# the real cause, e.g. "cuCtxCreate failed -> CUDA_ERROR_OUT_OF_MEMORY /
+# No capable devices found".
+#
+# The messages are generated but NOT let out through PyAV's own `libav.*`
+# loggers: a failed hardware probe emits a dozen raw context-free lines
+# ("nv12", "p010le", "DLL libamfrt64.so.1 failed to open"). capture_libav_logs()
+# collects them per open attempt so one aggregated, attributed warning can be
+# emitted instead (see mvs/encoder.py).
+if _AV_OK:
+    try:
+        _av_logging.set_level(_av_logging.ERROR)
+        logging.getLogger("libav").setLevel(logging.CRITICAL)
+    except Exception:
+        pass
 
 # JPEG fallback encoder
 try:
@@ -110,9 +152,26 @@ def probe_server_codecs() -> dict:
     for codec, groups in _SERVER_ENCODERS.items():
         caps[codec] = {}
         for kind, names in groups.items():
-            listed = any(name in text for name in names) if text else False
-            pyav_known = any(_pyav_codec_known(name) for name in names) if _AV_OK else False
-            caps[codec][kind] = (listed or pyav_known) and (kind == "sw" or _has_hw_encoder_device(names))
+            if kind == "hw":
+                # A hardware encoder counts as available only when THIS PyAV/FFmpeg
+                # build can actually open it. Neither of the cheaper signals is sound:
+                #   * `ffmpeg -encoders` describes the SYSTEM ffmpeg CLI, a different
+                #     FFmpeg build from the one PyAV encodes with — and frequently not
+                #     installed at all (measured: absent on the live deployment);
+                #   * _has_hw_encoder_device() only proves a device node exists, not
+                #     that a context can be created on it.
+                # Accepting either is how a host whose NVENC cannot initialise still
+                # advertised h265 hw=True. select_codec() then picked H.265 on the
+                # strength of that claim, the encoder cascade fell through to libx265,
+                # and the server ran SOFTWARE HEVC — exactly what auto mode's
+                # "never sw H.265" rule exists to prevent.
+                caps[codec][kind] = bool(
+                    _AV_OK and _has_hw_encoder_device(names)
+                    and any(_pyav_codec_known(name) for name in names))
+            else:
+                listed = any(name in text for name in names) if text else False
+                caps[codec][kind] = bool(
+                    listed or (_AV_OK and any(_pyav_codec_known(name) for name in names)))
     if not _AV_OK:
         for c in caps.values():
             c["hw"] = False
@@ -134,15 +193,16 @@ def _pyav_codec_known(name: str) -> bool:
     if not _AV_OK:
         return False
     try:
-        cc = _av.CodecContext.create(name, "w")
-        cc.width = 640
-        cc.height = 480
-        cc.pix_fmt = "yuv420p"
-        cc.time_base = fractions.Fraction(1, 1000)
-        cc.framerate = fractions.Fraction(60, 1)
-        cc.bit_rate = 500_000
-        cc.gop_size = 300
-        cc.open()
+        with capture_libav_logs():
+            cc = _av.CodecContext.create(name, "w")
+            cc.width = 640
+            cc.height = 480
+            cc.pix_fmt = "yuv420p"
+            cc.time_base = fractions.Fraction(1, 1000)
+            cc.framerate = fractions.Fraction(60, 1)
+            cc.bit_rate = 500_000
+            cc.gop_size = 300
+            cc.open()
         # VideoCodecContext has no close() — let cc go out of scope.
         return True
     except Exception:

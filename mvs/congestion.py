@@ -10,6 +10,25 @@ log = logging.getLogger("browser_screencast")
 # ---------------------------------------------------------------------------
 class AdaptiveController:
 
+    # --- ramp measurement constants -----------------------------------------
+    # Window over which _recent_bps() measures what we actually sent.
+    _BPS_WINDOW = 1.0
+    # Floor on the measurement's denominator, plus a minimum sample count (see
+    # _recent_bps). Together they stop one or two fat keyframes at the start of
+    # a burst from reading as many Mbps of proven link capacity; the per-tick
+    # growth cap below absorbs whatever distortion is left.
+    _BPS_MIN_ELAPSED = 0.25
+    _BPS_MIN_SAMPLES = 3
+    # How far above the measured send rate the encoder target may be pushed.
+    # This is the slow-start assumption: "the link carried X while the client
+    # reported clear, so 2X is a reasonable next probe". It is the ONLY thing
+    # that lets the target grow — an idle screen measures ~0 and therefore
+    # cannot grow the target at all, no matter how many ticks elapse.
+    _PROBE_GROWTH = 2.0
+    # Hardest single-tick growth. Ticks are >=100ms, so this still allows
+    # ~300kbps -> ~2.4Mbps in three ticks (~0.3s) when the measurement agrees.
+    _MAX_TICK_GROWTH = 2.0
+
     def __init__(self, cfg):
         self.fps = float(cfg.max_fps)
         self.max_fps = float(cfg.max_fps)
@@ -63,6 +82,32 @@ class AdaptiveController:
             return 0.0
         total = sum(b for _, b in self._sent_ring)
         return total * 8 / elapsed
+
+    def _recent_bps(self, window: float = 1.0) -> float:
+        """Bits/s actually handed to the socket over the last `window` seconds.
+
+        This is the ramp's measurement of "how much did we really push through
+        the link recently".  Two deliberate choices:
+
+        * The denominator is the time since the FIRST send inside the window,
+          not the whole window.  A burst that starts right after an idle period
+          is then measured on its own timescale instead of being diluted by the
+          preceding silence — which is what makes an idle→active ramp fast.
+        * That elapsed value is floored at `_BPS_MIN_ELAPSED` and at least
+          `_BPS_MIN_SAMPLES` frames are required, so one or two fat keyframes
+          cannot read as a huge instantaneous rate.
+
+        `now` (not the last sample time) is the window end, so the number decays
+        on its own as soon as sending stops — an idle screen reads ~0 without
+        any explicit static/active state.
+        """
+        now = time.monotonic()
+        cutoff = now - window
+        sel = [(t, b) for t, b in self._sent_ring if t >= cutoff]
+        if len(sel) < self._BPS_MIN_SAMPLES:
+            return 0.0
+        elapsed = max(now - sel[0][0], self._BPS_MIN_ELAPSED)
+        return sum(b for _, b in sel) * 8 / elapsed
 
     @property
     def draining(self):
@@ -328,6 +373,13 @@ class AdaptiveController:
                 self._metric_rtt = self._metric_rtt * 0.7 + rtt_ms * 0.3
 
     def on_fresh(self, frame_bytes: int = 0):
+        """One ramp tick, called by the sender after every frame.
+
+        `frame_bytes` is accepted for call-site compatibility but no longer
+        gates anything: the ramp is now clocked by measured throughput
+        (`_recent_bps`), which subsumes it. See the comment in the bitrate
+        branch below for why the byte gate was both too weak and too strong.
+        """
         with self._lock:
             now = time.monotonic()
             # Minimum tick: 100ms — lag reports are throttled to 10/s; no point checking faster.
@@ -367,46 +419,56 @@ class AdaptiveController:
                 self.fps = fps_ceil
                 _changed = True
             elif self.bitrate < self._max_br:
-                # Ramp bitrate in +20% steps per 2s tick rather than jumping to the ceiling
-                # in one hop. At 3Mbps after a 6Mbps congestion event this takes ~8 ticks
-                # (~16s) to reach 5.4Mbps, giving time for lag reports to fire if we overshoot
-                # before the queue builds to the drain-threshold again.
-                # Below the known ceiling (where we've congested before): +20%/tick.
-                # Above the ceiling (probing new territory): +10%/tick below 20Mbps, +5% above,
-                # BUT ONLY when the frame carried real data (>1 MTU).
+                # --- measurement gate ------------------------------------------------
+                # The encoder target may never exceed _PROBE_GROWTH x the rate we have
+                # actually pushed through the link recently.  This replaces the old
+                # `frame_bytes > 1500` gate, which was both too weak and too strong:
                 #
-                # Without the frame_bytes gate, near-zero static P-frames (100-400 bytes from
-                # an idle VNC desktop) produce lag reports showing 0 congestion, causing the
-                # controller to probe from 300k to 16Mbps in ~5s with no actual link testing.
-                # The first real frame (mouse move / window open) then hits at 16Mbps, congests,
-                # and the cycle repeats. Gating above-ceiling probes on frame_bytes>1500 ensures
-                # we only claim "the link handled more" when we actually sent data through it.
-                # Below-ceiling recovery (+20%) is ungated — converging back to the known stable
-                # point is safe even on near-zero frames.
+                #   too weak  — it only guarded the ABOVE-ceiling branch.  Until the
+                #               first congestion event _ceil_bitrate is 0, so
+                #               target == _max_br, the below-target branch ran ungated,
+                #               and the controller walked +20%/100ms all the way to
+                #               _max_br (measured: 300k -> 35Mbps in 2.9s on a 6Mbps
+                #               link) without a single byte of link testing.  The
+                #               resulting overshoot is what produces the queue blowup,
+                #               the backoff cascade, and the ratcheted-down ceiling.
+                #   too strong— on a static screen no frame ever clears the byte
+                #               threshold, so once a (possibly bogus) ceiling was
+                #               recorded the controller was pinned at 0.9x it for the
+                #               whole idle period and could only crawl +10%/tick out of
+                #               it afterwards.  That is the reported "parked at a few
+                #               hundred kbps, blurry until something moves" symptom.
+                #
+                # Measured throughput answers the real question ("did the link carry
+                # this?") directly, and answers it in both directions: an idle screen
+                # measures ~0 and cannot grow the target at all, while a busy screen on
+                # a fast link licenses a doubling per tick.
+                allowed = max(self._min_br, int(self._recent_bps(self._BPS_WINDOW)
+                                                * self._PROBE_GROWTH))
+                if allowed <= self.bitrate:
+                    # Nothing recently sent justifies a higher target. Near-zero static
+                    # P-frames land here — exactly what the old byte gate was for.
+                    return
+                allowed = min(allowed, self._max_br,
+                              int(self.bitrate * self._MAX_TICK_GROWTH))
+
+                # Below the last congestion point we are re-converging on known-good
+                # capacity (slow start): take the whole measured allowance in one hop.
+                # At or above it we are probing new territory (congestion avoidance):
+                # keep the old cautious +10% / +5% steps, now also capped by measurement.
                 target = int(self._ceil_bitrate * 0.90) if self._ceil_bitrate > 0 else self._max_br
                 target = min(target, self._max_br)
                 if self.bitrate < target:
-                    step = max(int(self.bitrate * 1.20), self.bitrate + 200_000)
-                    self.bitrate = min(target, step)
+                    self.bitrate = min(target, allowed)
                 else:
-                    # Above the congestion ceiling — only probe when the frame carried real data.
-                    # Near-zero static P-frames (idle desktop) don't test the link; probing on
-                    # them causes phantom ramps to 16+ Mbps followed by immediate congestion.
-                    # Threshold: max(500 bytes, half the average frame budget at current settings).
-                    # The 1500-byte floor was fine for VNC (byte-exact deltas) but traps H.264
-                    # at low bitrates where even content-bearing P-frames are < 1500 bytes.
-                    avg_frame = int(self.bitrate / max(1.0, self.fps) / 8)
-                    probe_min = max(500, avg_frame // 2)
-                    if frame_bytes <= probe_min:
-                        return  # near-zero frame: don't probe above last congestion ceiling
-                    if self.bitrate < 20_000_000:
-                        self.bitrate = min(self._max_br, int(self.bitrate * 1.10))
-                    else:
-                        self.bitrate = min(self._max_br, int(self.bitrate * 1.05))
+                    factor = 1.10 if self.bitrate < 20_000_000 else 1.05
+                    self.bitrate = min(self._max_br, allowed, int(self.bitrate * factor))
                 self.jpeg_quality = min(95, self.jpeg_quality + 5)
                 _changed = True
             if _changed:
-                log.info("fresh: fps=%.1f br=%dk ceil=%dk max=%dk", self.fps, self.bitrate//1000, self._ceil_bitrate//1000, self._max_br//1000)
+                log.info("fresh: fps=%.1f br=%dk ceil=%dk max=%dk sent=%dk",
+                         self.fps, self.bitrate // 1000, self._ceil_bitrate // 1000,
+                         self._max_br // 1000, int(self._recent_bps(self._BPS_WINDOW)) // 1000)
 
     def on_screen_active(self):
         """Screen content changed after a static period — restore fps and jump toward last
