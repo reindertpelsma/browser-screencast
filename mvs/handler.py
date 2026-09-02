@@ -146,6 +146,8 @@ async def client_session(ws, cfg, bridge):
     # Must be in outer scope so both closures reference the same variable.
     _need_keyframe = False
     _last_lag_received = 0.0   # set on first lag report; 0 = never received (skip proactive backoff)
+    _sends_since_lag = 0       # frames sent since the last lag report; see the proactive-backoff
+                               # watchdog in frame_sender() for why a plain time gap is not enough
 
     def _upgrade_encoder(tw: int = 0, th: int = 0, explicit: bool = False):
         nonlocal encoder, has_webcodecs, _enc_target_w, _enc_target_h, _codec_error_msg, _need_keyframe
@@ -211,7 +213,7 @@ async def client_session(ws, cfg, bridge):
     loop = asyncio.get_event_loop()
 
     async def input_reader():
-        nonlocal has_webcodecs, target_codec, _reinit_deadline, _codec_error_msg, _need_keyframe, _last_lag_received
+        nonlocal has_webcodecs, target_codec, _reinit_deadline, _codec_error_msg, _need_keyframe, _last_lag_received, _sends_since_lag
         cur_buttons = 0
         try:
             async for raw in ws:
@@ -252,6 +254,7 @@ async def client_session(ws, cfg, bridge):
                             # Reset proactive-backoff gate so the 500ms silence
                             # during decoder initialization doesn't trigger backoff.
                             _last_lag_received = 0.0
+                            _sends_since_lag = 0
                         if _codec_error_msg:
                             _msg = _codec_error_msg; _codec_error_msg = None
                             await ws.send(json.dumps({"t": "codec_error", "msg": _msg}))
@@ -276,6 +279,7 @@ async def client_session(ws, cfg, bridge):
                         wb = _get_wbuf(ws)
                         ctrl.on_lag(age, wb)
                         _last_lag_received = time.monotonic()
+                        _sends_since_lag = 0
                         # Positive path: clear signal → unlock next ramp step without
                         # waiting the full 2s heuristic.
                         # wb == 0 is a reliable "link not congested" indicator regardless
@@ -371,7 +375,7 @@ async def client_session(ws, cfg, bridge):
                     await ws.send(json.dumps({"t": "clipboard", "text": bridge.server_clipboard, "seq": sc}))
                 except Exception:
                     pass
-        nonlocal _enc_target_w, _enc_target_h, _reinit_deadline, _need_keyframe, _last_lag_received
+        nonlocal _enc_target_w, _enc_target_h, _reinit_deadline, _need_keyframe, _last_lag_received, _sends_since_lag
         last_encoder_codec = encoder.actual_codec
         _bw_sent = []       # list of (monotonic_time, bytes) for rolling 1s bandwidth measurement
         _t_diag = time.monotonic(); _n_diag = 0; _n_drop = 0; _n_nosend = 0
@@ -433,13 +437,28 @@ async def client_session(ws, cfg, bridge):
                 # actively sending, the download buffer is backed up to the point where the
                 # browser can't decode frames fast enough to produce lag reports. Treat this
                 # as a 500ms lag signal so the server backs off before the queue grows further.
-                # Triggers only when we're actually sending (n_diag > 3 = at least 3 frames
-                # sent this DIAG cycle) and not already in a drain pause.
-                if not ctrl.draining and _n_diag > 3 and _last_lag_received > 0 and now - _last_lag_received > 0.5:
-                    log.info("proactive backoff: no lag report for %.2fs (diag=%d br=%dk)",
-                             now - _last_lag_received, _n_diag, ctrl.bitrate // 1000)
+                #
+                # The "while we're actively sending" half used to be `_n_diag > 3`, a count of
+                # frames sent in the current 5s DIAG window. That count keeps the watchdog armed
+                # for up to 5s AFTER the screen goes static — but the browser only emits a lag
+                # report when a frame arrives, and a static screen is deliberately throttled to
+                # one heartbeat every 2s. So going idle reliably looked like a stalled link:
+                # measured, the watchdog fired 5 times in 2.1s right after the screen stopped
+                # changing, cut 2189k -> 519k, and ratcheted _ceil_bitrate down to 692k, where
+                # the controller then stayed for the rest of the session. That is the reported
+                # "parked at a few hundred kbps / blurry until something moves" symptom.
+                #
+                # The correct discriminator is frames sent that the client has not yet acked:
+                # a real stall keeps the sender pushing (that is how the queue builds), so
+                # several frames pile up unacked within 500ms. An idle screen sends one
+                # heartbeat and gets its report back, so the counter never reaches the bar.
+                if (not ctrl.draining and _sends_since_lag >= 3
+                        and _last_lag_received > 0 and now - _last_lag_received > 0.5):
+                    log.info("proactive backoff: no lag report for %.2fs (unacked=%d br=%dk)",
+                             now - _last_lag_received, _sends_since_lag, ctrl.bitrate // 1000)
                     ctrl.on_lag(500.0, 0)
                     _last_lag_received = now  # reset so backoff debounce has time to fire
+                    _sends_since_lag = 0
 
                 # Detect encoder codec switch and force an I-frame for the new decoder.
                 # After encoder rebuild the warmup consumed the I-frame; without an explicit
@@ -559,6 +578,7 @@ async def client_session(ws, cfg, bridge):
                                         await ws.send(hdr_s + payload_s)
                                         _last_sent_bytes = len(hdr_s) + len(payload_s)
                                         ctrl.report_sent(_last_sent_bytes)
+                                        _sends_since_lag += 1
                                         _n_diag += 1
                                         log.debug("static heartbeat: %dkbps q=%d", br_s // 1000, quality)
                                 except Exception as e:
@@ -717,6 +737,7 @@ async def client_session(ws, cfg, bridge):
                     await ws.send(hdr + payload)
                     _last_sent_bytes = len(hdr) + len(payload)
                     ctrl.report_sent(_last_sent_bytes)
+                    _sends_since_lag += 1
                 except Exception as e:
                     log.debug("send err: %s", e); break
 
