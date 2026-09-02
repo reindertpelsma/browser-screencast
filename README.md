@@ -23,6 +23,7 @@ macOS users: use the sibling project instead —
 - **Hardware H.265 / AV1 / VP9 / H.264** — WebCodecs in the browser decodes hardware-encoded frames. NVENC, VAAPI, or AMF on the server; software fallback (libx265/libvpx) when no GPU is present.
 - **x11grab direct capture** — reads straight from the X framebuffer via FFmpeg/libav. No VNC round-trip, no RFB protocol overhead.
 - **Adaptive congestion controller** — watches TCP backpressure and ping gradient rather than a fixed quality knob. Bitrate tracks the link.
+- **Client-side cursor plane** — the pointer is never encoded into the video. The server reports only what the cursor *is* (~30 bytes, on change only) and the browser draws it at your local pointer, so cursor motion costs no round trip at all.
 
 ## Requirements
 
@@ -94,6 +95,37 @@ The server auto-negotiates the best codec both sides support:
 | H.264 | NVENC / VAAPI / AMF | libx264 |
 
 Auto mode prefers H.265 for best quality/bitrate ratio. Force a codec with `--codec h264` etc.
+
+## Cursor
+
+The cursor is not part of the picture. Baking it into the frame (`draw_mouse=1`)
+makes every mouse movement wait for a full round trip, which over an SSH tunnel
+reads as lag even when the stream itself is current — so, like RDP, SPICE and
+VNC's cursor pseudo-encoding, it travels as metadata and is composited by the
+client at the *local* pointer position.
+
+What travels is the cursor's **identity**, not its pixels. On X11 the server
+watches XFixes (`XFixesSelectCursorInput`, event-driven — a still cursor costs
+nothing) and sends the cursor's name mapped to a CSS keyword:
+
+```json
+{"t":"cursor","vis":1,"css":2}
+```
+
+The browser then draws *your own* platform's pointer — right theme, right DPI,
+no scaling artefacts — for 30 bytes per change. Measured on a real GNOME
+desktop, the same cursor as a PNG would have been 2022 bytes. A cursor with no
+name we recognise (an app's custom pointer) falls back to the bitmap form
+(`{"vis":1,"img":"data:image/png;base64,…","hx":7,"hy":7}`); `"vis":0` means the
+remote hid its cursor, e.g. a game grabbing the mouse, and the client plane
+hides with it.
+
+Backends that cannot report a cursor — VNC, Windows, no XFixes — simply send
+nothing, and the client falls back to a generic marker. `--draw-mouse on`
+forces the old baked-in cursor; `auto` (the default) does that only when XFixes
+tracking is unavailable. The dock's **Hide cursor** toggle remains a manual
+override on top, and defaults to *off* — the cursor is now correct, so there is
+nothing to hide.
 
 ## Quality vs latency
 
