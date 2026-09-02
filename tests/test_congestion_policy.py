@@ -19,6 +19,20 @@ class _FakeClock:
         self.now += seconds
 
 
+def _feed(ctrl, fake, bps, seconds, fps=20.0):
+    """Simulate `seconds` of sending at `bps`, advancing the fake clock.
+
+    The ramp is clocked by measured throughput, so any test that expects the
+    controller to grow has to actually put bytes on the wire — same as the
+    sender does via report_sent() after every ws.send().
+    """
+    n = max(1, int(seconds * fps))
+    per_frame = max(1, int(bps / 8 / fps))
+    for _ in range(n):
+        fake.step(seconds / n)
+        ctrl.report_sent(per_frame)
+
+
 class CongestionPolicyTests(unittest.TestCase):
     def test_initial_bitrate_is_floored_at_300kbps(self):
         ctrl = AdaptiveController(SimpleNamespace(max_fps=60, initial_bitrate=1))
@@ -90,6 +104,10 @@ class CongestionPolicyTests(unittest.TestCase):
             ctrl._last_clear_t = fake.now - 0.1   # simulate recent browser "clear" signal
             ctrl.on_fresh()                         # first: fps restored to fps_ceil
             fake.step(0.2)
+            # Real content is flowing at the current 300kbps target — the ramp is
+            # measurement-clocked, so it needs to see bytes on the wire before it
+            # will claim any more capacity.
+            _feed(ctrl, fake, 300_000, 1.0)
             ctrl._last_clear_t = fake.now - 0.1
             ctrl.on_fresh()                         # second: bitrate ramp
 
