@@ -7,16 +7,6 @@
 *{margin:0;padding:0;box-sizing:border-box}
 html,body{width:100%;height:100%;background:#111;overflow:hidden}
 canvas{display:block;position:absolute;
-  /* Hide the BROWSER's cursor over the stream so only the remote one shows.
-     The capture backend draws the real cursor into the frame (x11grab sets
-     draw_mouse=1), so two cursors would otherwise chase each other with the
-     local one always ahead by the round-trip -- which reads as lag even when
-     the stream is current.
-     MUST be in this stylesheet rule, not inline: the resize handler assigns
-     canvas.style.cssText wholesale and would wipe an inline cursor property.
-     CAVEAT: the mss backend draws NO cursor, so with --capture mss this
-     leaves no visible cursor at all. Use --capture x11grab on X11. */
-  cursor:none;
   user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;-moz-user-select:none}
 #hud{position:fixed;top:6px;right:10px;color:#0f0;font:11px monospace;
   background:rgba(0,0,0,.7);padding:2px 8px;border-radius:3px;z-index:9;
