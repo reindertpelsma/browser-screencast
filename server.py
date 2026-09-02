@@ -57,6 +57,12 @@ def parse_args():
                    help="Use VNC for both capture and input")
     p.add_argument("--display", default=os.environ.get("DISPLAY", ":1.0"),
                    help="X display for x11grab capture (default :1.0)")
+    p.add_argument("--draw-mouse", choices=["auto", "on", "off"],
+                   default=os.environ.get("DRAW_MOUSE", "auto"),
+                   help="Bake the cursor into the captured frame. Default auto: "
+                        "off when the cursor can be sent as metadata and drawn "
+                        "client-side (no round-trip lag), on only as a fallback "
+                        "when XFixes cursor tracking is unavailable.")
     p.add_argument("--headless", action="store_true",
                    default=_truthy_env("HEADLESS"),
                    help="Start an Xvfb display and lightweight window manager on Linux")

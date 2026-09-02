@@ -101,6 +101,26 @@ if(new URLSearchParams(location.search).has('token'))
 """
 
 
+def cursor_update(bridge, known_seq):
+    """(new_seq, message) when the remote cursor changed, else None.
+
+    Split out of frame_sender so the change-detection and
+    graceful-degradation rules are directly testable.
+
+    A bridge with no cursor support has no `cursor_seq` at all — VNC, Windows,
+    mss on a display without XFixes, native Wayland later, or simply an older
+    bridge. That is not an error: return None and stay silent, and the client
+    keeps drawing its own fallback pointer.
+    """
+    seq = getattr(bridge, "cursor_seq", None)
+    if seq is None or seq == known_seq:
+        return None
+    state = getattr(bridge, "cursor_state", None)
+    if not state:
+        return None
+    return seq, state
+
+
 def _get_wbuf(ws):
     for attr in ("transport", ):
         try:
@@ -353,6 +373,7 @@ async def client_session(ws, cfg, bridge):
     async def frame_sender():
         nonlocal seq_num, last_send_time
         known_clip = bridge.server_clipboard_seq
+        known_cursor = None   # None = nothing sent yet
         # Tell client the native capture resolution so it can build the quality menu correctly.
         try:
             nw, nh = bridge.dimensions
@@ -366,6 +387,27 @@ async def client_session(ws, cfg, bridge):
                                           "seq": bridge.server_clipboard_seq}))
             except Exception:
                 pass
+        # --- cursor plane -------------------------------------------------
+        # The cursor is metadata, never pixels: the client draws it at the LOCAL
+        # pointer so motion costs no round trip. Sent ONLY when the remote shape
+        # or visibility actually changes — the check below is an int compare, so
+        # a still cursor costs nothing and a busy one costs ~30 bytes per change.
+        #
+        # getattr(): a bridge that knows nothing about cursors (VNC, Windows,
+        # native Wayland later, any old backend) simply has no cursor_seq, and
+        # this whole path stays silent. The client then keeps its own fallback
+        # pointer, i.e. exactly today's behaviour.
+        async def _send_cursor_if_changed():
+            nonlocal known_cursor
+            try:
+                update = cursor_update(bridge, known_cursor)
+                if update is None:
+                    return
+                known_cursor, state = update
+                await ws.send(json.dumps(state))
+            except Exception:
+                pass
+
         async def _send_clipboard_if_changed():
             nonlocal known_clip
             sc = bridge.server_clipboard_seq
@@ -375,6 +417,9 @@ async def client_session(ws, cfg, bridge):
                     await ws.send(json.dumps({"t": "clipboard", "text": bridge.server_clipboard, "seq": sc}))
                 except Exception:
                     pass
+        # Send the current cursor state on connect so the client starts with the
+        # right pointer instead of waiting for the next shape change.
+        await _send_cursor_if_changed()
         nonlocal _enc_target_w, _enc_target_h, _reinit_deadline, _need_keyframe, _last_lag_received, _sends_since_lag
         last_encoder_codec = encoder.actual_codec
         _bw_sent = []       # list of (monotonic_time, bytes) for rolling 1s bandwidth measurement
@@ -549,6 +594,7 @@ async def client_session(ws, cfg, bridge):
                 if cur_fb_seq == _last_encoded_seq and _pipe_task is None and not _need_keyframe \
                         and _bridge_pushes:
                     await _send_clipboard_if_changed()
+                    await _send_cursor_if_changed()
                     if not _was_static:
                         _was_static = True
                         _static_since = now
@@ -742,6 +788,7 @@ async def client_session(ws, cfg, bridge):
                     log.debug("send err: %s", e); break
 
                 await _send_clipboard_if_changed()
+                await _send_cursor_if_changed()
 
         except Exception as e:
             log.debug("sender exit: %s", e)

@@ -13,6 +13,10 @@ canvas{display:block;position:absolute;
   cursor:pointer;user-select:none}
 #hud.dim{opacity:0.25}
 #hud.hide{opacity:0;pointer-events:none}
+/* Fallback pointer only. Used when the server sends no cursor metadata
+   (non-X11 capture backend, or an older server that predates the cursor
+   plane). As soon as a {"t":"cursor"} message arrives this is hidden and the
+   browser draws the real pointer shape instead — see _applyCursorStyle(). */
 #cur{position:fixed;width:12px;height:12px;border:2px solid #fff;border-radius:50%;
   pointer-events:none;transform:translate(-50%,-50%);box-shadow:0 0 4px #000;z-index:9}
 #cur.dn{border-color:#ff0}
@@ -68,7 +72,11 @@ canvas{display:block;position:absolute;
 .q-sel{background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.14);border-radius:3px;
   color:#ccc;font:11px monospace;padding:2px 4px;flex:1;cursor:pointer}
 .q-sel:focus{outline:1px solid rgba(100,180,255,.4)}
-</style></head><body>
+</style>
+<!-- Cursor plane. A stylesheet rule, NOT an inline style: resize() assigns
+     canvas.style.cssText wholesale, which would wipe an inline cursor on the
+     first window resize. -->
+<style id="cursor-plane"></style></head><body>
 <canvas id="c"></canvas>
 <div id="hud">connecting...</div>
 <div id="cur"></div>
@@ -225,6 +233,67 @@ let _hideCursor=false;      // dock "Hide cursor" toggle
 let _plockActive=false;     // pointer lock engaged (real or emulated)
 let _plockVX=0,_plockVY=0; // virtual cursor position in native remote coords (pointer lock mode)
 const _plockSupported='requestPointerLock' in document.documentElement||'requestPointerLock' in (document.createElement('canvas'));
+
+// ---------------------------------------------------------------------------
+// Cursor plane — the remote pointer is metadata, composited here, never baked
+// into the video. Motion is therefore free: the pointer follows the LOCAL mouse
+// with zero round-trip, and only the SHAPE comes from the server.
+//
+// The server sends {"t":"cursor", vis, css?, img?, hx?, hy?} on change only:
+//   vis:0            → the remote hid its cursor (games do this) → cursor:none
+//   css:<int>        → index into CURSOR_CSS below; the browser then draws the
+//                      viewer's OWN native pointer (right theme, right DPI)
+//   img/hx/hy        → a bitmap + hotspot, for a backend that has no cursor
+//                      name to offer (native Wayland/PipeWire supplies exactly
+//                      this and nothing else). Preferred order: css, then img.
+// No message ever arriving is a supported state — see _applyCursorStyle().
+// ---------------------------------------------------------------------------
+// CURSOR_PLANE_BEGIN
+// Mirror of CURSOR_CSS in mvs/cursor.py — APPEND ONLY, indices are the wire
+// format. tests/test_cursor_plane.py fails if the two lists drift apart.
+const CURSOR_CSS=['default','text','pointer','crosshair','move','wait','progress',
+  'ew-resize','ns-resize','nesw-resize','nwse-resize','col-resize','row-resize',
+  'not-allowed','help','grab','grabbing','zoom-in','zoom-out','all-scroll',
+  'n-resize','s-resize','e-resize','w-resize','ne-resize','nw-resize','se-resize',
+  'sw-resize','alias','copy','context-menu','cell','vertical-text','no-drop'];
+let _remoteCursor=null;   // null = server never told us; keep the fallback dot
+
+// Server-supplied text goes into a stylesheet, so validate rather than trust:
+// an unknown index falls back to 'default', and a bitmap must look like a
+// self-contained image data URL with no way to close the url() and inject.
+function _remoteCursorCss(rc){
+  if(!rc)return null;
+  if(!rc.vis)return 'none';
+  if(typeof rc.css==='number'&&CURSOR_CSS[rc.css])return CURSOR_CSS[rc.css];
+  if(typeof rc.img==='string'&&/^data:image\/[a-z+]+;base64,[A-Za-z0-9+/=]+$/.test(rc.img)){
+    const hx=(rc.hx|0),hy=(rc.hy|0);
+    return 'url("'+rc.img+'") '+hx+' '+hy+', default';
+  }
+  return 'default';
+}
+
+// Single owner of every cursor decision. Precedence:
+//   1. manual override ("Hide cursor" dock toggle) / pointer lock → nothing
+//   2. remote cursor state, when the server sends one
+//   3. no metadata at all → browser default pointer + the generic #cur dot,
+//      i.e. exactly the pre-cursor-plane behaviour
+function _applyCursorStyle(){
+  const style=document.getElementById('cursor-plane');
+  const manualHide=_hideCursor||_plockActive;
+  const remote=_remoteCursorCss(_remoteCursor);
+  let rule='';
+  if(manualHide){
+    rule='canvas,body{cursor:none}';
+  }else if(remote){
+    // Only the canvas: the dock still needs a usable pointer even when the
+    // remote has hidden its own cursor.
+    rule='canvas{cursor:'+remote+'}';
+  }
+  style.textContent=rule;
+  // The generic dot exists only to stand in for a cursor we don't have.
+  cur.style.display=(manualHide||remote)?'none':'';
+}
+// CURSOR_PLANE_END
 
 // Metrics
 let rxBytes=0,rxBps=0;         // WebSocket receive bandwidth
@@ -726,6 +795,9 @@ function connect(){
   };
   ws.onclose=()=>{
     wsOpen=false;mBtn=0;hud.textContent='disconnected';
+    // Drop the cursor plane: its shape is only meaningful while the session is
+    // live, and the next server we reach may not send one at all.
+    _remoteCursor=null;_applyCursorStyle();
     if(_suppressReconnect){
       st.textContent='paused (tab hidden)';
     }else{
@@ -757,6 +829,10 @@ function connect(){
           _writeClipboard(msg.text);
           st.textContent='[clipboard] '+msg.text.substring(0,50);
           setTimeout(()=>{st.textContent='';},3000);
+        }else if(msg.t==='cursor'){
+          // Cursor plane update. Sent on change only, never per frame.
+          _remoteCursor={vis:msg.vis!==0,css:msg.css,img:msg.img,hx:msg.hx,hy:msg.hy};
+          _applyCursorStyle();
         }else if(msg.t==='codec_error'){
           _showError(msg.msg||'Codec unavailable');
         }else if(msg.t==='eval'){
@@ -1161,11 +1237,11 @@ btnFit.addEventListener('click',()=>{
 // ---------------------------------------------------------------------------
 const btnHideCursor=document.getElementById('btn-hide-cursor');
 function _applyHideCursor(){
-  // Apply or remove cursor:none. Pointer lock also hides cursor; this is orthogonal.
-  const hide=_hideCursor||_plockActive;
-  canvas.style.cursor=hide?'none':'';
-  document.body.style.cursor=hide?'none':'';
-  cur.style.display=hide?'none':'';
+  // Manual override on top of the cursor plane. Deliberately NOT inline styles:
+  // canvas.style.cursor is wiped the next time resize() rewrites cssText, which
+  // silently resurrected the cursor mid-session. _applyCursorStyle() writes a
+  // stylesheet rule instead and owns the whole precedence chain.
+  _applyCursorStyle();
 }
 btnHideCursor.addEventListener('click',()=>{
   _hideCursor=!_hideCursor;

@@ -36,6 +36,9 @@ class X11GrabBridge:
         self._cached_seq = -1
         self.server_clipboard = None
         self.server_clipboard_seq = 0
+        # Cursor plane: the pointer is metadata, not pixels. See mvs/cursor.py.
+        self._cursor = None
+        self._draw_mouse = False
         # python-xlib state (initialised in _start_input)
         self._xd = None         # Xlib Display
         self._root = None
@@ -80,7 +83,11 @@ class X11GrabBridge:
                     options={
                         'video_size': f'{self._W or 1920}x{self._H or 1080}',
                         'framerate': str(int(fps)),
-                        'draw_mouse': '1',
+                        # 0 by design: the cursor travels as metadata and is
+                        # composited by the client at the LOCAL pointer, so it
+                        # is never a round-trip behind. Only flipped back to 1
+                        # when the cursor plane could not start (see start()).
+                        'draw_mouse': '1' if self._draw_mouse else '0',
                     })
                 vstream = container.streams.video[0]
                 W = vstream.codec_context.width
@@ -249,8 +256,43 @@ class X11GrabBridge:
                 pass
 
     # ------------------------------------------------------------------
+    # Cursor plane (metadata, not pixels)
+    # ------------------------------------------------------------------
+    @property
+    def cursor_seq(self):
+        return self._cursor.cursor_seq if self._cursor else None
+
+    @property
+    def cursor_state(self):
+        return self._cursor.cursor_state if self._cursor else None
+
+    def _start_cursor(self):
+        """Start XFixes cursor tracking; decide whether ffmpeg draws the mouse.
+
+        `--draw-mouse auto` (the default) means: don't bake the cursor into the
+        frame if we can ship it as metadata instead, but do bake it in on a box
+        where XFixes is missing — a baked-in cursor is late, no cursor at all is
+        unusable.
+        """
+        mode = str(getattr(self._cfg, 'draw_mouse', 'auto') or 'auto').lower()
+        if mode == 'on':
+            self._draw_mouse = True
+            return
+        from mvs.cursor import make_cursor_tracker
+        self._cursor = make_cursor_tracker(self._display_str)
+        if mode == 'off':
+            self._draw_mouse = False
+        else:
+            self._draw_mouse = self._cursor is None
+        if self._draw_mouse:
+            log.warning("no cursor metadata available — falling back to "
+                        "draw_mouse=1 (cursor baked into the frame, one "
+                        "round-trip late)")
+
+    # ------------------------------------------------------------------
     def start(self):
         self._start_input()
+        self._start_cursor()
         # Probe display size before capture loop starts
         try:
             if self._xd:
@@ -261,3 +303,11 @@ class X11GrabBridge:
             pass
         threading.Thread(target=self._capture_loop, daemon=True, name='x11grab').start()
         threading.Thread(target=self._clipboard_poll, daemon=True, name='x11grab-clip').start()
+
+    def stop(self):
+        if self._cursor is not None:
+            try:
+                self._cursor.stop()
+            except Exception:
+                pass
+            self._cursor = None
