@@ -693,6 +693,14 @@ class PlatformBridge:
     def cursor_state(self):
         return self._cursor.cursor_state if self._cursor else None
 
+    @property
+    def cursor_state_exact(self):
+        return self._cursor.cursor_state_exact if self._cursor else None
+
+    def request_cursor_bitmaps(self):
+        if self._cursor:
+            self._cursor.request_cursor_bitmaps()
+
     def stop(self):
         try:
             self._capture.stop()

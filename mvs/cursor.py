@@ -26,6 +26,7 @@ import logging
 import os
 import select
 import threading
+from collections import OrderedDict
 
 log = logging.getLogger("browser_screencast")
 
@@ -206,18 +207,25 @@ def png_data_url(width, height, argb, max_dim=MAX_BITMAP_DIM):
         return None
 
 
-def cursor_message(visible, css=None, png_data_url=None, hotspot=None):
+def cursor_message(visible, css=None, png_data_url=None, hotspot=None, cid=None):
     """Build the `{"t":"cursor", …}` payload.
 
     Field set is intentionally small and optional-heavy so a backend can supply
     a name (`css`), a bitmap (`img`/`hx`/`hy`), or neither:
 
-        {"t":"cursor","vis":1,"css":2}                    # X11 name → CSS keyword
-        {"t":"cursor","vis":1,"img":"data:…","hx":4,"hy":4}   # future Wayland bitmap
-        {"t":"cursor","vis":0}                            # remote hid its cursor
+        {"t":"cursor","vis":1,"css":2}                        # name → CSS keyword
+        {"t":"cursor","vis":1,"id":7,"img":"data:…","hx":4,"hy":4}   # bitmap
+        {"t":"cursor","vis":1,"id":7}                         # bitmap, cached
+        {"t":"cursor","vis":0}                                # remote hid it
+
+    `id` is the XFixes cursor serial: a stable identity for "this exact cursor
+    object". The client caches bitmaps under it, so a shape it has already seen
+    costs an id instead of a PNG — see mvs/handler.py's CursorChannel.
     """
     msg = {"t": "cursor", "vis": 1 if visible else 0}
     if visible:
+        if cid is not None:
+            msg["id"] = int(cid)
         if css is not None:
             msg["css"] = int(css)
         if png_data_url:
@@ -229,22 +237,36 @@ def cursor_message(visible, css=None, png_data_url=None, hotspot=None):
 
 
 class CursorPublisher:
-    """Sequence-stamped holder for the current cursor state.
+    """Sequence-stamped holder for the current cursor state, in two flavours.
 
-    `seq` only advances when the state the *client* would render changes. The
-    XFixes serial is the cheap first filter (no request at all while it is
-    unchanged); this is the second: two different cursor serials that both map
-    to `text` are one state as far as the wire is concerned, and re-sending
-    would be pure waste.
+    `cursor_state` is the *native* flavour: a CSS keyword whenever the cursor
+    has a name, so the viewer's own themed pointer is drawn for ~30 bytes.
+    `cursor_state_exact` is the *exact* flavour: always the remote's own pixels,
+    which is the only way to be truthful about a remote theme or an app's
+    custom cursor — a keyword is rendered by the VIEWER's theme, so `text`
+    means "the viewer's I-beam", not "the remote's I-beam".
+
+    Both are published together and share one `seq`, so a client can switch
+    flavour without the server tracking per-client state.
+
+    `seq` advances when the cursor changes identity or rendered state. The
+    XFixes serial is part of that identity on purpose: two same-looking cursors
+    with different serials are different cursor objects, and `exact` mode must
+    notice. The near-duplicate that costs nothing is suppressed one layer up,
+    where the handler drops a message identical to the last one it sent.
     """
 
     def __init__(self):
         self._lock = threading.Lock()
         self._seq = 0
         self._msg = None
+        self._exact = None
         self._key = None
         self.updates = 0   # state changes published (what goes on the wire)
         self.events = 0    # XFixes notifications seen (before dedupe)
+        #: Set once any client asks for `exact` mode. Until then no bitmap is
+        #: ever fetched or PNG-encoded, so the default mode costs nothing extra.
+        self.want_bitmaps = False
 
     @property
     def cursor_seq(self):
@@ -256,13 +278,41 @@ class CursorPublisher:
         with self._lock:
             return dict(self._msg) if self._msg else None
 
-    def publish(self, visible, css=None, png_data_url=None, hotspot=None):
-        key = (bool(visible), css, png_data_url, tuple(hotspot) if hotspot else None)
+    @property
+    def cursor_state_exact(self):
+        """Pixel-exact flavour, falling back to the native one.
+
+        The fallback matters: an oversized cursor (>128px, which no browser
+        will render as a CSS cursor image) or a backend that cannot produce a
+        bitmap still has to say *something*, and a keyword beats nothing.
+        """
+        with self._lock:
+            if self._exact:
+                return dict(self._exact)
+            return dict(self._msg) if self._msg else None
+
+    def request_cursor_bitmaps(self):
+        """Ask for the exact flavour to start being produced."""
+        self.want_bitmaps = True
+
+    def publish(self, visible, css=None, png_data_url=None, hotspot=None,
+                cid=None, exact=None):
+        """Publish one cursor state. `exact` is an optional (url, hotspot, id)."""
+        key = (bool(visible), css, png_data_url,
+               tuple(hotspot) if hotspot else None, cid,
+               (exact[0], tuple(exact[1]), exact[2]) if exact else None)
         with self._lock:
             if key == self._key:
                 return False
             self._key = key
-            self._msg = cursor_message(visible, css, png_data_url, hotspot)
+            self._msg = cursor_message(visible, css, png_data_url, hotspot, cid)
+            if visible and exact:
+                eurl, ehot, ecid = exact
+                self._exact = cursor_message(True, None, eurl, ehot, ecid)
+            elif visible and png_data_url:
+                self._exact = dict(self._msg)   # already pixels
+            else:
+                self._exact = None              # → falls back to native
             self._seq += 1
             self.updates += 1
             return True
@@ -295,11 +345,15 @@ class XFixesCursorTracker(CursorPublisher):
         self._thread = None
         self._stop = threading.Event()
         self._serial = None
-        # serial → (data-url, hotspot) for cursors with no usable name.
-        # Bounded: a session cycles through a handful of custom cursors, and an
-        # unbounded cache would grow with every app that ships its own.
-        self._bitmaps = {}
+        # serial → (data-url, hotspot, serial) for cursors we have encoded.
+        # Bounded LRU: a session cycles through a handful of shapes, and an
+        # unbounded cache would grow with every app that ships its own cursor.
+        self._bitmaps = OrderedDict()
         self._bitmap_limit = 32
+        # Self-pipe: lets stop() and request_cursor_bitmaps() interrupt the
+        # select() immediately instead of waiting out its timeout, without
+        # touching the X connection from another thread.
+        self._wake_r = self._wake_w = None
 
     # -- setup ---------------------------------------------------------
     def start(self):
@@ -338,6 +392,7 @@ class XFixesCursorTracker(CursorPublisher):
                      self._display_str, e)
             self._d = None
             return False
+        self._wake_r, self._wake_w = os.pipe()
         self._refresh()
         self._thread = threading.Thread(target=self._loop, daemon=True,
                                         name="cursor-plane")
@@ -346,25 +401,97 @@ class XFixesCursorTracker(CursorPublisher):
         return True
 
     def stop(self):
+        """Ask the loop thread to exit; it closes its own descriptors.
+
+        Nothing here closes the X connection or the pipe, on purpose. Closing a
+        descriptor another thread is sitting in select() on is a use-after-free
+        in disguise: the number is immediately recycled by the next socket
+        anyone opens, and the loop then reads from a stranger's connection.
+        (That is not hypothetical — it corrupted the very next X connection in
+        the test suite before this was fixed.)
+        """
         self._stop.set()
+        self._wake()   # break the select() immediately
+        thread, self._thread = self._thread, None
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
+            if thread.is_alive():
+                # Wedged loop: leaking two descriptors is strictly better than
+                # closing numbers it may still be selecting on.
+                log.debug("cursor plane thread did not stop; leaving fds open")
+                return
+        self._close_fds()
+
+    def _close_fds(self):
+        """Close the X connection and the self-pipe. Callers must guarantee the
+        loop thread is not running — see stop()."""
         d, self._d = self._d, None
         try:
             if d is not None:
                 d.close()
         except Exception:
             pass
+        r, w = self._wake_r, self._wake_w
+        self._wake_r = self._wake_w = None
+        for fd in (r, w):
+            try:
+                if fd is not None:
+                    os.close(fd)
+            except Exception:
+                pass
+
+    def _wake(self):
+        try:
+            if self._wake_w is not None:
+                os.write(self._wake_w, b"x")
+        except Exception:
+            pass
+
+    def request_cursor_bitmaps(self):
+        """Switch on the exact flavour (a client selected `exact` mode).
+
+        Deliberately one-way and lazy: nothing is encoded until somebody asks,
+        and once asked we keep producing bitmaps for the rest of the session
+        rather than tracking which clients still want them.
+        """
+        if self.want_bitmaps:
+            return
+        self.want_bitmaps = True
+        self._wake()   # produce the exact flavour for the CURRENT cursor now
 
     # -- event loop ----------------------------------------------------
     def _loop(self):
+        try:
+            self._run_loop()
+        except Exception as e:   # never let the thread die noisily
+            log.debug("cursor plane thread exit: %s", e)
+        # Deliberately closes nothing: stop() joins this thread first and then
+        # closes, so exactly one thread ever touches these descriptors and only
+        # once the other is provably gone.
+
+    def _run_loop(self):
         fd = self._d.fileno()
+        wake = self._wake_r
         while not self._stop.is_set():
             try:
-                # select() rather than a blocking next_event() so stop() is
-                # honoured promptly; the timeout is a liveness tick, not a poll
-                # (no X request is issued unless an event arrived).
-                r, _, _ = select.select([fd], [], [], 0.5)
+                # select() rather than a blocking next_event() so stop() and a
+                # mode switch are honoured at once; the timeout is a liveness
+                # tick, not a poll (no X request is issued unless woken).
+                r, _, _ = select.select([fd, wake], [], [], 0.5)
                 if not r:
                     continue
+                if wake in r:
+                    try:
+                        os.read(wake, 4096)
+                    except Exception:
+                        pass
+                    if self._stop.is_set():
+                        return
+                    # want_bitmaps just came on: re-publish the current cursor
+                    # with its exact flavour attached.
+                    self._refresh()
+                    if fd not in r:
+                        continue
                 changed = False
                 for _ in range(self._d.pending_events()):
                     ev = self._d.next_event()
@@ -396,30 +523,35 @@ class XFixesCursorTracker(CursorPublisher):
         if not visible:
             self.publish(False)
             return
+        # The exact flavour is only produced once some client has asked for it.
+        exact = self._bitmap(serial) if self.want_bitmaps else None
         idx = lookup_css_index(name)
         if idx is not None:
-            # Named cursor: send the keyword and let the browser draw the
-            # viewer's own themed pointer. Costs ~30 bytes and looks native.
-            self.publish(True, css=idx)
+            # Named cursor: the native flavour is the keyword, so the browser
+            # draws the viewer's own themed pointer for ~30 bytes.
+            self.publish(True, css=idx, cid=serial, exact=exact)
             return
         # No name we recognise — an app-drawn cursor (a paint tool, a game's
-        # custom pointer). A keyword would be a lie, so send the real pixels.
-        bitmap = self._bitmap(serial)
+        # custom pointer). A keyword would be a lie, so send the real pixels
+        # even in native mode.
+        bitmap = exact or self._bitmap(serial)
         if bitmap is not None:
-            url, hotspot = bitmap
-            self.publish(True, png_data_url=url, hotspot=hotspot)
+            url, hotspot, bser = bitmap
+            self.publish(True, png_data_url=url, hotspot=hotspot, cid=bser)
         else:
-            self.publish(True, css=CSS_DEFAULT)
+            self.publish(True, css=CSS_DEFAULT, cid=serial)
 
     def _bitmap(self, serial):
-        """(data-url, (xhot, yhot)) for the current cursor, or None.
+        """(data-url, (xhot, yhot), serial) for the current cursor, or None.
 
-        Only reached for nameless cursors, so the extra round trip and the PNG
-        encode happen rarely — never per frame, and never for the ordinary
-        arrow/I-beam/hand traffic that makes up almost all cursor changes.
+        Cached by XFixes serial, so a shape the session has already encoded
+        costs nothing to revisit. The id returned is the serial the bitmap
+        actually belongs to: the cursor can change between the name request and
+        this one, and the client caches by that id, so it must not be a guess.
         """
         cached = self._bitmaps.get(serial)
         if cached is not None:
+            self._bitmaps.move_to_end(serial)
             return cached
         try:
             img = self._d.xfixes_get_cursor_image(self._root)
@@ -429,10 +561,12 @@ class XFixesCursorTracker(CursorPublisher):
         url = png_data_url(int(img.width), int(img.height), img.cursor_image)
         if url is None:
             return None
-        entry = (url, (int(img.xhot), int(img.yhot)))
-        if len(self._bitmaps) >= self._bitmap_limit:
-            self._bitmaps.clear()
-        self._bitmaps[int(img.cursor_serial)] = entry
+        bser = int(img.cursor_serial)
+        entry = (url, (int(img.xhot), int(img.yhot)), bser)
+        self._bitmaps[bser] = entry
+        self._bitmaps.move_to_end(bser)
+        while len(self._bitmaps) > self._bitmap_limit:
+            self._bitmaps.popitem(last=False)   # evict least recently used
         return entry
 
     def _read_cursor(self):

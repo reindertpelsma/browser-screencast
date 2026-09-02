@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import time
+from collections import OrderedDict
 from pathlib import Path
 
 from mvs.codec import (CODEC_JPEG, CODEC_H264, CODEC_H265, CODEC_AV1, CODEC_VP9,
@@ -101,24 +102,103 @@ if(new URLSearchParams(location.search).has('token'))
 """
 
 
-def cursor_update(bridge, known_seq):
-    """(new_seq, message) when the remote cursor changed, else None.
+class CursorChannel:
+    """Per-session cursor state: which flavour this client wants, and what it
+    has already been sent.
 
-    Split out of frame_sender so the change-detection and
-    graceful-degradation rules are directly testable.
+    Two client-selectable flavours (the dock's Cursor button):
+      • `native` — CSS keyword when the cursor has a name; the browser draws
+        the VIEWER's themed pointer. ~30 bytes per change.
+      • `exact`  — always the remote's own pixels, so the shape is identical to
+        what the remote shows, custom app cursors and remote theme included.
+      • `off`    — the client draws nothing. Purely a rendering choice, so the
+        server keeps it on the cheap `native` flavour; switching back is then
+        instant instead of waiting for the next cursor change.
 
-    A bridge with no cursor support has no `cursor_seq` at all — VNC, Windows,
-    mss on a display without XFixes, native Wayland later, or simply an older
-    bridge. That is not an error: return None and stay silent, and the client
-    keeps drawing its own fallback pointer.
+    What makes `exact` affordable is client-side caching keyed by the XFixes
+    serial: the bitmap goes out the FIRST time a serial is seen and after that
+    only its id does. A session cycles through a handful of shapes, so steady
+    state costs the same as `native`.
+
+    `sent` is bounded — a client that reconnects in a loop, or a remote that
+    generates fresh cursor serials forever, must not be able to grow this
+    without limit. Eviction is safe: if the client later reports a cache miss
+    (`cursor_need`) the bitmap is simply sent again.
     """
-    seq = getattr(bridge, "cursor_seq", None)
-    if seq is None or seq == known_seq:
-        return None
-    state = getattr(bridge, "cursor_state", None)
-    if not state:
-        return None
-    return seq, state
+
+    CACHE_CAP = 64          # serials remembered per session; mirrors the client
+    MODES = ("native", "exact", "off")
+
+    def __init__(self, mode="native"):
+        self.mode = mode if mode in self.MODES else "native"
+        self.known_seq = None
+        self.last = None            # last message actually sent
+        self.sent = OrderedDict()   # serial → True, bitmaps this client has
+        self._force = False         # resend even if nothing changed
+
+    def set_mode(self, mode, bridge=None):
+        """Switch flavour. Returns True if the mode actually changed."""
+        if mode not in self.MODES or mode == self.mode:
+            return False
+        self.mode = mode
+        self._force = True   # the client needs the other flavour right now
+        if mode == "exact" and bridge is not None:
+            req = getattr(bridge, "request_cursor_bitmaps", None)
+            if req:
+                req()
+        return True
+
+    def forget(self, cid):
+        """Client reported a cache miss for `cid` — send its bitmap again."""
+        self.sent.pop(cid, None)
+        self._force = True
+
+    def update(self, bridge):
+        """The message to send now, or None.
+
+        A bridge with no cursor support has no `cursor_seq` at all — VNC,
+        Windows, mss on a display without XFixes, native Wayland later, or
+        simply an older bridge. That is not an error: return None and stay
+        silent, and the client keeps drawing its own fallback pointer.
+        """
+        seq = getattr(bridge, "cursor_seq", None)
+        if seq is None:
+            return None
+        if seq == self.known_seq and not self._force:
+            return None
+        if self.mode == "exact":
+            state = getattr(bridge, "cursor_state_exact", None) or \
+                getattr(bridge, "cursor_state", None)
+        else:
+            state = getattr(bridge, "cursor_state", None)
+        if not state:
+            return None
+        msg = dict(state)
+        cid = msg.get("id")
+        if "img" in msg:
+            if cid is not None and cid in self.sent:
+                # Cache hit: the client already holds these pixels under this
+                # id, so ship the id alone (~25 bytes instead of ~2 KB).
+                self.sent.move_to_end(cid)
+                msg.pop("img", None)
+                msg.pop("hx", None)
+                msg.pop("hy", None)
+            elif cid is not None:
+                self.sent[cid] = True
+                self.sent.move_to_end(cid)
+                while len(self.sent) > self.CACHE_CAP:
+                    self.sent.popitem(last=False)
+        elif self.mode != "exact":
+            # A keyword message needs no identity: dropping the id lets two
+            # different cursor objects that both render as `text` collapse into
+            # one wire message below.
+            msg.pop("id", None)
+        self.known_seq = seq
+        if msg == self.last and not self._force:
+            return None
+        self._force = False
+        self.last = msg
+        return msg
 
 
 def _get_wbuf(ws):
@@ -162,6 +242,9 @@ async def client_session(ws, cfg, bridge):
 
     seq_num = 0
     last_send_time = time.monotonic()
+    # Cursor plane state for this client (flavour + what it has been sent).
+    # Shared between input_reader (mode changes, cache misses) and frame_sender.
+    cursor_ch = CursorChannel()
     # Shared between frame_sender (read/write) and input_reader (write).
     # Must be in outer scope so both closures reference the same variable.
     _need_keyframe = False
@@ -245,6 +328,20 @@ async def client_session(ws, cfg, bridge):
                     if t == "reset":
                         cur_buttons = 0
                         bridge.send_key_reset()
+                    elif t == "cursor_mode":
+                        # Which cursor flavour this client wants to draw. Purely
+                        # a rendering choice — it never touches input handling,
+                        # pointer lock, or the coordinate space of pointer
+                        # events; "off" means "draw nothing", not "go relative".
+                        cursor_ch.set_mode(str(ev.get("mode") or ""), bridge)
+                    elif t == "cursor_need":
+                        # The client evicted (or never had) the bitmap for this
+                        # cursor id and needs it resent. Keeps the two caches
+                        # from having to agree on an eviction policy.
+                        try:
+                            cursor_ch.forget(int(ev.get("id")))
+                        except (TypeError, ValueError):
+                            pass
                     elif t == "caps":
                         new_webcodecs = bool(ev.get("webcodecs", False))
                         if not new_webcodecs and has_webcodecs:
@@ -373,7 +470,6 @@ async def client_session(ws, cfg, bridge):
     async def frame_sender():
         nonlocal seq_num, last_send_time
         known_clip = bridge.server_clipboard_seq
-        known_cursor = None   # None = nothing sent yet
         # Tell client the native capture resolution so it can build the quality menu correctly.
         try:
             nw, nh = bridge.dimensions
@@ -398,13 +494,10 @@ async def client_session(ws, cfg, bridge):
         # this whole path stays silent. The client then keeps its own fallback
         # pointer, i.e. exactly today's behaviour.
         async def _send_cursor_if_changed():
-            nonlocal known_cursor
             try:
-                update = cursor_update(bridge, known_cursor)
-                if update is None:
-                    return
-                known_cursor, state = update
-                await ws.send(json.dumps(state))
+                msg = cursor_ch.update(bridge)
+                if msg is not None:
+                    await ws.send(json.dumps(msg))
             except Exception:
                 pass
 

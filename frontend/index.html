@@ -89,7 +89,7 @@ canvas{display:block;position:absolute;
     <button class="dock-btn" id="btn-fs">Fullscreen</button>
     <button class="dock-btn" id="btn-fit">Fit screen</button>
     <button class="dock-btn" id="btn-plock" style="display:none">Pointer lock [off]</button>
-    <button class="dock-btn" id="btn-hide-cursor">Hide cursor [off]</button>
+    <button class="dock-btn" id="btn-cursor">Cursor [native]</button>
     <button class="dock-btn" id="btn-audio">Audio [off]</button>
     <button class="dock-btn" id="btn-fix" title="Force a keyframe to clear video corruption">Fix screen</button>
     <button class="dock-btn" id="btn-ctrl">Ctrl=Super [off]</button>
@@ -229,7 +229,13 @@ function _syncMods(e){
   }
 }
 let _suppressReconnect=false,_hiddenTimer=null;  // tab visibility disconnect
-let _hideCursor=false;      // dock "Hide cursor" toggle
+// Cursor rendering mode: 'native' | 'exact' | 'off'. Persisted across sessions.
+// Affects DRAWING ONLY — never input, never pointer lock.
+let _cursorMode=(()=>{
+  try{const v=localStorage.getItem('bsc.cursorMode');
+      if(v==='native'||v==='exact'||v==='off')return v;}catch(e){}
+  return 'native';
+})();
 let _plockActive=false;     // pointer lock engaged (real or emulated)
 let _plockVX=0,_plockVY=0; // virtual cursor position in native remote coords (pointer lock mode)
 const _plockSupported='requestPointerLock' in document.documentElement||'requestPointerLock' in (document.createElement('canvas'));
@@ -239,14 +245,29 @@ const _plockSupported='requestPointerLock' in document.documentElement||'request
 // into the video. Motion is therefore free: the pointer follows the LOCAL mouse
 // with zero round-trip, and only the SHAPE comes from the server.
 //
-// The server sends {"t":"cursor", vis, css?, img?, hx?, hy?} on change only:
+// The server sends {"t":"cursor", vis, id?, css?, img?, hx?, hy?} on change only:
 //   vis:0            → the remote hid its cursor (games do this) → cursor:none
 //   css:<int>        → index into CURSOR_CSS below; the browser then draws the
 //                      viewer's OWN native pointer (right theme, right DPI)
-//   img/hx/hy        → a bitmap + hotspot, for a backend that has no cursor
-//                      name to offer (native Wayland/PipeWire supplies exactly
-//                      this and nothing else). Preferred order: css, then img.
+//   img/hx/hy        → the remote's actual pixels + hotspot
+//   id               → XFixes cursor serial. The bitmap for an id is sent ONCE;
+//                      afterwards the id arrives alone and we reuse the cached
+//                      data URL, which is what makes `exact` mode affordable.
 // No message ever arriving is a supported state — see _applyCursorStyle().
+//
+// THREE MODES, chosen by the user in the dock, persisted in localStorage:
+//   native (default) — keyword when the cursor has a name: cheapest, and the
+//                      viewer's own theme/DPI. But a keyword is rendered by the
+//                      VIEWER's theme, so it is the right *kind* of cursor, not
+//                      the remote's actual icon.
+//   exact            — always the remote's own pixels: identical to what the
+//                      remote shows, custom app cursors and remote theme too.
+//   off              — draw nothing.
+//
+// NONE of this touches input. Cursor mode decides only what is DRAWN; it never
+// changes which coordinate space pointer events use, and `off` is emphatically
+// not pointer lock (see the pointer-lock section: unlocked = absolute
+// clientX/clientY, locked = relative movementX/movementY, always).
 // ---------------------------------------------------------------------------
 // CURSOR_PLANE_BEGIN
 // Mirror of CURSOR_CSS in mvs/cursor.py — APPEND ONLY, indices are the wire
@@ -256,31 +277,72 @@ const CURSOR_CSS=['default','text','pointer','crosshair','move','wait','progress
   'not-allowed','help','grab','grabbing','zoom-in','zoom-out','all-scroll',
   'n-resize','s-resize','e-resize','w-resize','ne-resize','nw-resize','se-resize',
   'sw-resize','alias','copy','context-menu','cell','vertical-text','no-drop'];
+const CURSOR_MODES=['native','exact','off'];
 let _remoteCursor=null;   // null = server never told us; keep the fallback dot
+// id → {img,hx,hy}. Bounded, so a remote churning out fresh cursor serials
+// cannot make the page accumulate bitmaps without limit. Mirrors the server's
+// per-session cap; if the two ever disagree, the miss path below repairs it.
+const _cursorCache=new Map();
+const CURSOR_CACHE_CAP=64;
+
+function _cursorCachePut(id,entry){
+  if(_cursorCache.has(id))_cursorCache.delete(id);
+  _cursorCache.set(id,entry);
+  while(_cursorCache.size>CURSOR_CACHE_CAP)_cursorCache.delete(_cursorCache.keys().next().value);
+}
+function _cursorCacheGet(id){
+  const e=_cursorCache.get(id);
+  if(e){_cursorCache.delete(id);_cursorCache.set(id,e);}  // LRU touch
+  return e;
+}
+
+// Fold an incoming cursor message into renderable state, resolving a bare id
+// against the cache. Returns false on a cache miss so the caller can ask the
+// server to resend the bitmap.
+function _cursorFromMessage(msg){
+  const rc={vis:msg.vis!==0,css:msg.css,img:msg.img,hx:msg.hx,hy:msg.hy,id:msg.id};
+  if(rc.vis&&msg.id!==undefined){
+    if(msg.img){
+      _cursorCachePut(msg.id,{img:msg.img,hx:msg.hx|0,hy:msg.hy|0});
+    }else if(msg.css===undefined){
+      const hit=_cursorCacheGet(msg.id);
+      if(!hit){_remoteCursor=rc;return false;}   // miss: keep drawing, ask again
+      rc.img=hit.img;rc.hx=hit.hx;rc.hy=hit.hy;
+    }
+  }
+  _remoteCursor=rc;
+  return true;
+}
 
 // Server-supplied text goes into a stylesheet, so validate rather than trust:
 // an unknown index falls back to 'default', and a bitmap must look like a
 // self-contained image data URL with no way to close the url() and inject.
-function _remoteCursorCss(rc){
+function _remoteCursorCss(rc,mode){
   if(!rc)return null;
   if(!rc.vis)return 'none';
-  if(typeof rc.css==='number'&&CURSOR_CSS[rc.css])return CURSOR_CSS[rc.css];
+  const kw=(typeof rc.css==='number'&&CURSOR_CSS[rc.css])?CURSOR_CSS[rc.css]:null;
+  let bmp=null;
   if(typeof rc.img==='string'&&/^data:image\/[a-z+]+;base64,[A-Za-z0-9+/=]+$/.test(rc.img)){
-    const hx=(rc.hx|0),hy=(rc.hy|0);
-    return 'url("'+rc.img+'") '+hx+' '+hy+', default';
+    bmp='url("'+rc.img+'") '+(rc.hx|0)+' '+(rc.hy|0)+', default';
   }
-  return 'default';
+  // exact mode wants the remote's real pixels whenever we have them; native
+  // mode wants the cheap, correctly-themed keyword. Either falls back to the
+  // other rather than drawing nothing.
+  return (mode==='exact'?(bmp||kw):(kw||bmp))||'default';
 }
 
 // Single owner of every cursor decision. Precedence:
-//   1. manual override ("Hide cursor" dock toggle) / pointer lock → nothing
-//   2. remote cursor state, when the server sends one
-//   3. no metadata at all → browser default pointer + the generic #cur dot,
+//   1. pointer lock → nothing to draw: the remote app draws its own crosshair
+//      into the frame, and a system cursor on top of it would be a laggy
+//      duplicate. (Input behaviour is decided elsewhere and is untouched.)
+//   2. cursor mode 'off' → the user asked for no cursor
+//   3. remote cursor state, when the server sends one
+//   4. no metadata at all → browser default pointer + the generic #cur dot,
 //      i.e. exactly the pre-cursor-plane behaviour
 function _applyCursorStyle(){
   const style=document.getElementById('cursor-plane');
-  const manualHide=_hideCursor||_plockActive;
-  const remote=_remoteCursorCss(_remoteCursor);
+  const manualHide=(_cursorMode==='off')||_plockActive;
+  const remote=_remoteCursorCss(_remoteCursor,_cursorMode);
   let rule='';
   if(manualHide){
     rule='canvas,body{cursor:none}';
@@ -769,6 +831,10 @@ function connect(){
   ws.onopen=()=>{
     wsOpen=true;_lastAnyData=Date.now();
     send({t:'reset'});  // release any stuck keys/buttons from previous session
+    // Restore the persisted cursor mode on this connection. A server that
+    // predates the cursor plane ignores the message; a fresh session starts in
+    // 'native' regardless, so this is what makes 'exact'/'off' survive reloads.
+    if(_cursorMode!=='native')send({t:'cursor_mode',mode:_cursorMode});
     st.textContent='connected';
     startLagReporter();
     ki.focus();
@@ -796,8 +862,10 @@ function connect(){
   ws.onclose=()=>{
     wsOpen=false;mBtn=0;hud.textContent='disconnected';
     // Drop the cursor plane: its shape is only meaningful while the session is
-    // live, and the next server we reach may not send one at all.
-    _remoteCursor=null;_applyCursorStyle();
+    // live, and the next server we reach may not send one at all. The bitmap
+    // cache goes too — cursor ids are XFixes serials, only meaningful within
+    // the remote X session we were just talking to.
+    _remoteCursor=null;_cursorCache.clear();_applyCursorStyle();
     if(_suppressReconnect){
       st.textContent='paused (tab hidden)';
     }else{
@@ -831,7 +899,12 @@ function connect(){
           setTimeout(()=>{st.textContent='';},3000);
         }else if(msg.t==='cursor'){
           // Cursor plane update. Sent on change only, never per frame.
-          _remoteCursor={vis:msg.vis!==0,css:msg.css,img:msg.img,hx:msg.hx,hy:msg.hy};
+          if(!_cursorFromMessage(msg)){
+            // We were sent an id whose bitmap we no longer hold (evicted, or
+            // this is a fresh page against a server that still thinks we have
+            // it). Ask for the pixels; keep drawing the old cursor meanwhile.
+            send({t:'cursor_need',id:msg.id});
+          }
           _applyCursorStyle();
         }else if(msg.t==='codec_error'){
           _showError(msg.msg||'Codec unavailable');
@@ -910,6 +983,17 @@ setInterval(()=>{
 // ---------------------------------------------------------------------------
 // Mouse
 // ---------------------------------------------------------------------------
+// POINTER_INPUT_BEGIN
+// The input contract of the whole client, and it is deliberately independent
+// of anything the cursor plane does:
+//   NOT pointer-locked → clientX/clientY → ABSOLUTE coordinates to the guest
+//                        (what makes desktop use and click-to-move games work)
+//   pointer-locked     → movementX/movementY → RELATIVE deltas accumulated into
+//                        a virtual position (what makes FPS mouselook work)
+// Cursor mode ('native'/'exact'/'off') changes only what is DRAWN and must
+// never appear in this block. tests/test_cursor_plane.py runs these handlers
+// under every mode with pointer lock both on and off and asserts the emitted
+// events are identical.
 function toVNC(cx,cy){return[Math.round((cx-ox)*scaleX),Math.round((cy-oy)*scaleY)];}
 function inBounds(vx,vy){return vx>=0&&vy>=0&&vx<_nativeW&&vy<_nativeH;}
 
@@ -942,6 +1026,7 @@ window.addEventListener('mouseup',e=>{
   const[vx,vy]=_plockActive?[Math.round(_plockVX),Math.round(_plockVY)]:toVNC(e.clientX,e.clientY);
   send({t:'mu',b:e.button,x:vx,y:vy});
 });
+// POINTER_INPUT_END
 canvas.addEventListener('contextmenu',e=>e.preventDefault());
 // Wheel events come at very different magnitudes depending on input device:
 //   • Old mouse wheel (deltaMode=1): one notch = deltaY 1, mul×40 → 40 px
@@ -1235,19 +1320,33 @@ btnFit.addEventListener('click',()=>{
 // ---------------------------------------------------------------------------
 // Hide cursor toggle
 // ---------------------------------------------------------------------------
-const btnHideCursor=document.getElementById('btn-hide-cursor');
+const btnCursor=document.getElementById('btn-cursor');
 function _applyHideCursor(){
-  // Manual override on top of the cursor plane. Deliberately NOT inline styles:
-  // canvas.style.cursor is wiped the next time resize() rewrites cssText, which
-  // silently resurrected the cursor mid-session. _applyCursorStyle() writes a
-  // stylesheet rule instead and owns the whole precedence chain.
+  // Kept as the name the pointer-lock paths call. Deliberately NOT inline
+  // styles: canvas.style.cursor is wiped the next time resize() rewrites
+  // cssText, which silently resurrected the cursor mid-session.
+  // _applyCursorStyle() writes a stylesheet rule and owns the precedence chain.
   _applyCursorStyle();
 }
-btnHideCursor.addEventListener('click',()=>{
-  _hideCursor=!_hideCursor;
-  btnHideCursor.textContent='Hide cursor ['+ (_hideCursor?'on':'off')+']';
-  btnHideCursor.classList.toggle('active',_hideCursor);
-  _applyHideCursor();
+function _updateCursorBtn(){
+  btnCursor.textContent='Cursor ['+_cursorMode+']';
+  // Only 'off' is a departure from normal: highlight that, not every non-default.
+  btnCursor.classList.toggle('active',_cursorMode!=='native');
+}
+function _setCursorMode(mode){
+  if(CURSOR_MODES.indexOf(mode)<0)return;
+  _cursorMode=mode;
+  try{localStorage.setItem('bsc.cursorMode',mode);}catch(e){}
+  // Tell the server which flavour to send. It replies with the current cursor
+  // in that flavour; until then we keep drawing what we already have.
+  send({t:'cursor_mode',mode:_cursorMode});
+  _updateCursorBtn();
+  _applyCursorStyle();
+}
+_updateCursorBtn();
+btnCursor.addEventListener('click',()=>{
+  // native → exact → off → native
+  _setCursorMode(CURSOR_MODES[(CURSOR_MODES.indexOf(_cursorMode)+1)%CURSOR_MODES.length]);
   ki.focus();
 });
 
