@@ -120,12 +120,31 @@ name we recognise (an app's custom pointer) falls back to the bitmap form
 remote hid its cursor, e.g. a game grabbing the mouse, and the client plane
 hides with it.
 
-Backends that cannot report a cursor — VNC, Windows, no XFixes — simply send
-nothing, and the client falls back to a generic marker. `--draw-mouse on`
-forces the old baked-in cursor; `auto` (the default) does that only when XFixes
-tracking is unavailable. The dock's **Hide cursor** toggle remains a manual
-override on top, and defaults to *off* — the cursor is now correct, so there is
-nothing to hide.
+A CSS keyword is drawn by *your* theme, though, so `text` means "your I-beam",
+not "the remote's I-beam". The dock's **Cursor** button cycles the three
+answers, and the choice is remembered:
+
+| Mode | What you get | Cost |
+|------|--------------|------|
+| `native` (default) | your own themed pointer, right DPI; pixels only for cursors with no name | ~30 B per change |
+| `exact` | the remote's actual icon, its theme and custom app cursors included | 2 KB the first time each cursor is seen, 29 B every time after |
+| `off` | no cursor drawn | nothing |
+
+`exact` is affordable because the client caches bitmaps under the cursor's
+XFixes serial: the pixels are sent once per shape and afterwards only the id
+is. A session visiting 15 distinct cursors pays ~30 KB once and then costs the
+same as `native`. Both caches are bounded, and a client that has evicted a
+bitmap just asks for it again.
+
+Cursor mode changes only what is *drawn*. It never affects input: unlocked
+sends absolute coordinates, pointer-locked sends relative motion, in every
+mode.
+
+Backends that cannot report a cursor — VNC, Windows, native Wayland, no XFixes
+— simply send nothing, and the client keeps a visible pointer of its own
+rather than hiding it with nothing to replace it. `--draw-mouse on` forces the
+old baked-in cursor; `auto` (the default) does that only when XFixes tracking
+is unavailable.
 
 ## Quality vs latency
 
