@@ -50,6 +50,13 @@ async def run(a):
     frames = []          # (t_rel, nbytes, age_ms)
     t0 = None
     last_lag = 0.0
+    # Mirror frontend/index.html's _linkAgeFromServerTimestamp: server and client
+    # clocks are never synchronised, so the raw (now - send_ts) carries clock skew
+    # plus one-way latency. The browser calibrates that out by tracking the minimum
+    # raw age seen and reporting only the growth above it. Reporting the raw value
+    # instead makes every frame on a 150ms WAN path look like 150ms of congestion,
+    # which pins the controller at the bitrate floor and invalidates the trace.
+    clock_offset = None
 
     async with websockets.connect(url, open_timeout=10,
                                   max_size=32 * 1024 * 1024) as ws:
@@ -71,7 +78,10 @@ async def run(a):
                 continue
             _, ts_ms, _codec, _kf, _plen = struct.unpack_from(HDR, msg)
             now = time.monotonic()
-            age = max(1, int(time.time() * 1000) - ts_ms)
+            raw_age = int(time.time() * 1000) - ts_ms
+            if clock_offset is None or raw_age < clock_offset:
+                clock_offset = raw_age
+            age = max(1, raw_age - clock_offset)
             frames.append((now - t0, len(msg), age))
             if now - last_lag >= 0.1:
                 last_lag = now
