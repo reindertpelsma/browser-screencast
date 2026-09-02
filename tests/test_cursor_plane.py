@@ -205,6 +205,63 @@ class _patched:
         return False
 
 
+class PlatformBridgeCursorTests(unittest.TestCase):
+    """mss capture draws no cursor at all, so it needs the plane most."""
+
+    def _bridge(self):
+        from mvs.platform import BackendSelection, NullInput, PlatformBridge
+
+        class Cfg:
+            pass
+        return PlatformBridge(Cfg(), BackendSelection(capture=object(),
+                                                      input=NullInput()))
+
+    def test_no_display_means_no_cursor_metadata(self):
+        bridge = self._bridge()
+        with _env("DISPLAY", None):
+            bridge._start_cursor()
+        self.assertIsNone(bridge.cursor_seq)
+        self.assertIsNone(bridge.cursor_state)
+
+    def test_x11_session_gets_the_cursor_plane(self):
+        bridge = self._bridge()
+        pub = CursorPublisher()
+        pub.publish(True, css=1)
+        with _env("DISPLAY", ":0"), _patched(mvs_cursor, "make_cursor_tracker",
+                                             lambda d: pub):
+            bridge._start_cursor()
+        self.assertEqual(bridge.cursor_state["css"], 1)
+
+    def test_tracker_failure_degrades_instead_of_raising(self):
+        bridge = self._bridge()
+
+        def boom(_display):
+            raise RuntimeError("no XFixes here")
+
+        with _env("DISPLAY", ":0"), _patched(mvs_cursor, "make_cursor_tracker", boom):
+            bridge._start_cursor()
+        self.assertIsNone(bridge.cursor_seq)
+
+
+class _env:
+    def __init__(self, name, value):
+        self.name, self.value = name, value
+
+    def __enter__(self):
+        self.old = os.environ.get(self.name)
+        if self.value is None:
+            os.environ.pop(self.name, None)
+        else:
+            os.environ[self.name] = self.value
+
+    def __exit__(self, *exc):
+        if self.old is None:
+            os.environ.pop(self.name, None)
+        else:
+            os.environ[self.name] = self.old
+        return False
+
+
 class FrontendCursorPlaneTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

@@ -654,6 +654,7 @@ class PlatformBridge:
         self._capture = selection.capture
         self._input = selection.input or NullInput()
         self._clipboard = Clipboard()
+        self._cursor = None
 
     def start(self) -> bool:
         if not self._capture.start():
@@ -662,13 +663,47 @@ class PlatformBridge:
             log.warning("input backend unavailable; view-only mode")
             self._input = NullInput()
         self._clipboard.start()
+        self._start_cursor()
         return True
+
+    def _start_cursor(self):
+        """Attach the cursor plane when the session happens to be X11.
+
+        mss never draws a cursor, so this path used to show none at all — the
+        client had nothing but its generic dot. Whenever there is an X display
+        (a plain X11 session, or XWayland), XFixes can tell us the cursor's
+        name for free, so take it. Everything else — Windows, native Wayland,
+        no display — leaves _cursor as None and sends no cursor metadata,
+        which the handler and the client both already treat as normal.
+        """
+        if platform.system() == "Windows" or not os.environ.get("DISPLAY"):
+            return
+        try:
+            from mvs.cursor import make_cursor_tracker
+            self._cursor = make_cursor_tracker(os.environ.get("DISPLAY"))
+        except Exception as e:
+            log.debug("cursor plane unavailable: %s", e)
+            self._cursor = None
+
+    @property
+    def cursor_seq(self):
+        return self._cursor.cursor_seq if self._cursor else None
+
+    @property
+    def cursor_state(self):
+        return self._cursor.cursor_state if self._cursor else None
 
     def stop(self):
         try:
             self._capture.stop()
         except Exception:
             pass
+        if self._cursor is not None:
+            try:
+                self._cursor.stop()
+            except Exception:
+                pass
+            self._cursor = None
         self._clipboard.stop()
 
     def is_running(self):
