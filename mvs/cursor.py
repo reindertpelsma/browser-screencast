@@ -120,20 +120,20 @@ X11_CURSOR_CSS = {
 }
 
 
-def css_index_for_name(name):
-    """X11 cursor name → index into CURSOR_CSS. Unknown/empty → `default`.
+def lookup_css_index(name):
+    """X11 cursor name → index into CURSOR_CSS, or None if we don't know it.
 
-    Never raises and never returns something the client cannot render: an
-    unrecognised cursor is a normal, frequent event (apps ship custom cursors
-    with no name at all) and must degrade to a plain arrow, not to an error.
+    None is the interesting answer: it means "this cursor is something we have
+    no keyword for", which is the signal to send the actual bitmap instead of
+    pretending it is an arrow.
     """
     if not name:
-        return CSS_DEFAULT
+        return None
     if isinstance(name, bytes):
         name = name.decode("utf-8", errors="replace")
     key = name.strip().lower()
     if not key:
-        return CSS_DEFAULT
+        return None
     mapped = X11_CURSOR_CSS.get(key)
     if mapped is not None:
         return CSS_INDEX[mapped]
@@ -142,7 +142,68 @@ def css_index_for_name(name):
         return CSS_INDEX[key]
     if key.replace("_", "-") in CSS_INDEX:
         return CSS_INDEX[key.replace("_", "-")]
-    return CSS_DEFAULT
+    return None
+
+
+def css_index_for_name(name):
+    """Total version of lookup_css_index(): unknown/empty → `default`.
+
+    Never raises and never returns something the client cannot render: an
+    unrecognised cursor is a normal, frequent event (apps ship custom cursors
+    with no name at all) and must degrade to a plain arrow, not to an error.
+    """
+    idx = lookup_css_index(name)
+    return CSS_DEFAULT if idx is None else idx
+
+
+# A CSS cursor image is capped at 128x128 by browsers, and anything near that
+# is already far bigger than a real cursor. Above it, fall back to a keyword.
+MAX_BITMAP_DIM = 128
+
+
+def png_data_url(width, height, argb, max_dim=MAX_BITMAP_DIM):
+    """Premultiplied-ARGB cursor pixels → a `data:image/png;base64,…` URL.
+
+    XFixes hands out premultiplied ARGB; PNG wants straight alpha, so the
+    colour channels are divided back out — skipping that turns every
+    antialiased cursor edge into a dark halo on a light background.
+
+    Returns None (rather than raising) whenever the bitmap is unusable, so the
+    caller can fall back to a keyword.
+    """
+    if not width or not height or width > max_dim or height > max_dim:
+        return None
+    if len(argb) < width * height:
+        return None
+    try:
+        from PIL import Image
+    except Exception:
+        return None
+    out = bytearray(width * height * 4)
+    for i in range(width * height):
+        px = argb[i]
+        a = (px >> 24) & 0xFF
+        r = (px >> 16) & 0xFF
+        g = (px >> 8) & 0xFF
+        b = px & 0xFF
+        if a and a != 255:
+            r = min(255, (r * 255 + a // 2) // a)
+            g = min(255, (g * 255 + a // 2) // a)
+            b = min(255, (b * 255 + a // 2) // a)
+        j = i * 4
+        out[j] = r
+        out[j + 1] = g
+        out[j + 2] = b
+        out[j + 3] = a
+    try:
+        import base64
+        from io import BytesIO
+        buf = BytesIO()
+        Image.frombytes("RGBA", (width, height), bytes(out)).save(
+            buf, format="PNG", optimize=True)
+        return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception:
+        return None
 
 
 def cursor_message(visible, css=None, png_data_url=None, hotspot=None):
@@ -234,6 +295,11 @@ class XFixesCursorTracker(CursorPublisher):
         self._thread = None
         self._stop = threading.Event()
         self._serial = None
+        # serial → (data-url, hotspot) for cursors with no usable name.
+        # Bounded: a session cycles through a handful of custom cursors, and an
+        # unbounded cache would grow with every app that ships its own.
+        self._bitmaps = {}
+        self._bitmap_limit = 32
 
     # -- setup ---------------------------------------------------------
     def start(self):
@@ -327,7 +393,47 @@ class XFixesCursorTracker(CursorPublisher):
             return
         serial, visible, name = info
         self._serial = serial
-        self.publish(visible, css=css_index_for_name(name))
+        if not visible:
+            self.publish(False)
+            return
+        idx = lookup_css_index(name)
+        if idx is not None:
+            # Named cursor: send the keyword and let the browser draw the
+            # viewer's own themed pointer. Costs ~30 bytes and looks native.
+            self.publish(True, css=idx)
+            return
+        # No name we recognise — an app-drawn cursor (a paint tool, a game's
+        # custom pointer). A keyword would be a lie, so send the real pixels.
+        bitmap = self._bitmap(serial)
+        if bitmap is not None:
+            url, hotspot = bitmap
+            self.publish(True, png_data_url=url, hotspot=hotspot)
+        else:
+            self.publish(True, css=CSS_DEFAULT)
+
+    def _bitmap(self, serial):
+        """(data-url, (xhot, yhot)) for the current cursor, or None.
+
+        Only reached for nameless cursors, so the extra round trip and the PNG
+        encode happen rarely — never per frame, and never for the ordinary
+        arrow/I-beam/hand traffic that makes up almost all cursor changes.
+        """
+        cached = self._bitmaps.get(serial)
+        if cached is not None:
+            return cached
+        try:
+            img = self._d.xfixes_get_cursor_image(self._root)
+        except Exception as e:
+            log.debug("cursor bitmap fetch failed: %s", e)
+            return None
+        url = png_data_url(int(img.width), int(img.height), img.cursor_image)
+        if url is None:
+            return None
+        entry = (url, (int(img.xhot), int(img.yhot)))
+        if len(self._bitmaps) >= self._bitmap_limit:
+            self._bitmaps.clear()
+        self._bitmaps[int(img.cursor_serial)] = entry
+        return entry
 
     def _read_cursor(self):
         """(serial, visible, name) for the currently displayed cursor."""

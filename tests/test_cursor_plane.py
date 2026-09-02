@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from mvs import cursor as mvs_cursor
 from mvs.cursor import (CURSOR_CSS, CursorPublisher, css_index_for_name,
-                        cursor_message)
+                        cursor_message, lookup_css_index, png_data_url)
 from mvs.handler import cursor_update
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -84,6 +84,43 @@ class CursorMessageTests(unittest.TestCase):
                              hotspot=(4, 5))
         self.assertEqual(msg["img"], "data:image/png;base64,AAAA")
         self.assertEqual((msg["hx"], msg["hy"]), (4, 5))
+
+
+class BitmapFallbackTests(unittest.TestCase):
+    """Cursors with no name we recognise travel as pixels instead."""
+
+    def test_unknown_names_are_reported_as_unknown(self):
+        self.assertIsNone(lookup_css_index("some_app_custom_cursor"))
+        self.assertIsNone(lookup_css_index(""))
+        self.assertEqual(lookup_css_index("xterm"), CURSOR_CSS.index("text"))
+
+    def test_premultiplied_alpha_is_divided_back_out(self):
+        # Skipping this turns every antialiased cursor edge into a dark halo.
+        from PIL import Image
+        import base64
+        import io
+        url = png_data_url(2, 2, [0x80402010, 0x00000000, 0xFFFFFFFF, 0xFF804020])
+        self.assertTrue(url.startswith("data:image/png;base64,"))
+        img = Image.open(io.BytesIO(base64.b64decode(url.split(",", 1)[1])))
+        self.assertEqual(img.mode, "RGBA")
+        self.assertEqual(img.getpixel((0, 0)), (128, 64, 32, 128))  # unpremultiplied
+        self.assertEqual(img.getpixel((1, 0)), (0, 0, 0, 0))
+        self.assertEqual(img.getpixel((1, 1)), (128, 64, 32, 255))
+
+    def test_oversized_or_empty_bitmaps_are_refused(self):
+        # Browsers cap CSS cursor images at 128x128; above that a keyword is
+        # the only thing that will render.
+        self.assertIsNone(png_data_url(0, 0, []))
+        self.assertIsNone(png_data_url(256, 256, [0] * (256 * 256)))
+        self.assertIsNone(png_data_url(4, 4, [0] * 3))
+
+    def test_bitmap_message_omits_the_keyword(self):
+        # The client prefers `css` when present, so a bitmap cursor must not
+        # also claim to be an arrow.
+        msg = cursor_message(True, css=None, png_data_url="data:image/png;base64,AA",
+                             hotspot=(1, 2))
+        self.assertNotIn("css", msg)
+        self.assertEqual(msg["img"], "data:image/png;base64,AA")
 
 
 class ChangeDetectionTests(unittest.TestCase):
@@ -400,6 +437,12 @@ class XFixesTrackerTests(unittest.TestCase):
         self.d.screen().root.change_attributes(cursor=c)
         self.d.sync()
 
+    def _set_unnamed_cursor(self, glyph):
+        c = self.font.create_glyph_cursor(self.font, glyph, glyph + 1,
+                                          (0, 0, 0), (65535, 65535, 65535))
+        self.d.screen().root.change_attributes(cursor=c)
+        self.d.sync()
+
     def _set_invisible_cursor(self):
         root = self.d.screen().root
         pm = root.create_pixmap(1, 1, 1)
@@ -437,6 +480,22 @@ class XFixesTrackerTests(unittest.TestCase):
         self.assertEqual(tracker.cursor_seq, seq)
         self.assertEqual(tracker.updates, updates)
         self.assertGreater(tracker.events, 0, "no XFixes events were delivered")
+
+    def test_nameless_cursor_falls_back_to_a_bitmap(self):
+        from mvs.cursor import make_cursor_tracker
+        tracker = make_cursor_tracker(self.DISPLAY)
+        self.assertIsNotNone(tracker)
+        self.addCleanup(tracker.stop)
+        self._set_named_cursor(152, "xterm")
+        self._wait(tracker, lambda s: s.get("css") == CURSOR_CSS.index("text"))
+        # A cursor that no app bothered to name (or one named something we have
+        # no keyword for) must arrive as pixels, not as a wrong arrow.
+        self._set_unnamed_cursor(58)   # XC_gumby: nothing like it in CSS
+        state = self._wait(tracker, lambda s: "img" in s)
+        self.assertNotIn("css", state)
+        self.assertTrue(state["img"].startswith("data:image/png;base64,"))
+        self.assertIn("hx", state)
+        self.assertIn("hy", state)
 
     def test_transparent_cursor_reports_hidden(self):
         from mvs.cursor import make_cursor_tracker
